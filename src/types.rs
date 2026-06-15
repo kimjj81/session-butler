@@ -29,6 +29,8 @@ pub struct CodexSessionMeta {
     pub has_user_event: bool,
     pub size_bytes: u64,
     pub indexed_at: Option<DateTime<Utc>>,
+    /// tool/skill 이름별 호출 수 (function_call/custom_tool_call의 name 집계)
+    pub tool_usage: HashMap<String, usize>,
 }
 
 /// JSONL 레코드 타입 (Codex)

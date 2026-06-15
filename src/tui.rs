@@ -265,6 +265,40 @@ impl TuiApp {
                 backend: Backend::Codex,
             },
             MenuItem {
+                id: "insights".to_string(),
+                title: "Insights".to_string(),
+                description: i18n::tui_desc("insights").to_string(),
+                command: Commands::Insights {
+                    days: 0,
+                    top: 15,
+                    json: false,
+                },
+                args: vec![
+                    Arg {
+                        name: "days".to_string(),
+                        description: "대상 일수 (0=전체)".to_string(),
+                        default_value: "0".to_string(),
+                        value: "0".to_string(),
+                        arg_type: ArgType::Number,
+                    },
+                    Arg {
+                        name: "top".to_string(),
+                        description: "순위 Top-N".to_string(),
+                        default_value: "15".to_string(),
+                        value: "15".to_string(),
+                        arg_type: ArgType::Number,
+                    },
+                    Arg {
+                        name: "json".to_string(),
+                        description: "JSON 출력".to_string(),
+                        default_value: "false".to_string(),
+                        value: "false".to_string(),
+                        arg_type: ArgType::Flag,
+                    },
+                ],
+                backend: Backend::Codex,
+            },
+            MenuItem {
                 id: "summarize".to_string(),
                 title: "Summarize".to_string(),
                 description: i18n::tui_desc("summarize").to_string(),
@@ -570,6 +604,12 @@ impl TuiApp {
             Commands::Stats { .. } => {
                 let days = get_val("days").parse().unwrap_or(30);
                 Commands::Stats { days }
+            }
+            Commands::Insights { .. } => {
+                let days = get_val("days").parse().unwrap_or(0);
+                let top = get_val("top").parse().unwrap_or(15);
+                let json = get_val("json") == "true";
+                Commands::Insights { days, top, json }
             }
             Commands::Compact { .. } => {
                 let days = get_val("days").parse().unwrap_or(0);

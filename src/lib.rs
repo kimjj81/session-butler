@@ -15,6 +15,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod i18n;
+pub mod insights;
 pub mod scanner;
 pub mod summary;
 pub mod tui;

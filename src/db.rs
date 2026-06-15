@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::types::{ArchivedSessionRow, CodexSessionMeta, SessionInfo};
 use chrono::Utc;
 use rusqlite::{Connection, params};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 세션 인덱스 데이터베이스 매니저
@@ -76,6 +77,17 @@ impl SessionDb {
             [],
         ).map_err(|e| Error::Sqlite(e))?;
 
+        // tool/skill별 호출 수 (insights 집계용)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS tool_usage (
+                session_id TEXT NOT NULL,
+                tool_name  TEXT NOT NULL,
+                call_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, tool_name)
+            )",
+            [],
+        ).map_err(|e| Error::Sqlite(e))?;
+
         self.migrate()?;
 
         Ok(())
@@ -104,6 +116,21 @@ impl SessionDb {
                 }
             }
             self.conn.execute("PRAGMA user_version = 1", [])
+                .map_err(|e| Error::Sqlite(e))?;
+        }
+
+        if version < 2 {
+            // tool_usage 테이블 (init_tables에서도 생성하지만 구버전 DB 호환용)
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS tool_usage (
+                    session_id TEXT NOT NULL,
+                    tool_name  TEXT NOT NULL,
+                    call_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (session_id, tool_name)
+                )",
+                [],
+            ).map_err(|e| Error::Sqlite(e))?;
+            self.conn.execute("PRAGMA user_version = 2", [])
                 .map_err(|e| Error::Sqlite(e))?;
         }
 
@@ -194,6 +221,33 @@ impl SessionDb {
             cwd,
             git_url,
         ]).map_err(|e| Error::Sqlite(e))?;
+
+        // tool_usage 갱신 (기존 행 삭제 후 재삽입 — 재인덱싱 시 중복 방지)
+        self.upsert_tool_usage(&meta.session_id, &meta.tool_usage)?;
+
+        Ok(())
+    }
+
+    /// tool_usage 행 갱신: 기존 행 삭제 후 현재 분포 삽입.
+    /// 빈 map이면 삭제만 수행(이전에 기록된 tool 사용이 사라진 경우 정합성 유지).
+    fn upsert_tool_usage(&self, session_id: &str, usage: &HashMap<String, usize>) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tool_usage WHERE session_id = ?1",
+            params![session_id],
+        ).map_err(|e| Error::Sqlite(e))?;
+
+        if usage.is_empty() {
+            return Ok(());
+        }
+
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO tool_usage (session_id, tool_name, call_count) VALUES (?1, ?2, ?3)"
+        ).map_err(|e| Error::Sqlite(e))?;
+
+        for (tool_name, count) in usage {
+            stmt.execute(params![session_id, tool_name, *count as i64])
+                .map_err(|e| Error::Sqlite(e))?;
+        }
 
         Ok(())
     }
@@ -424,6 +478,169 @@ impl SessionDb {
         Ok(rows)
     }
 
+    /// 윈도우 하한(yyyy-mm-dd). days=0 → 전체 기간을 뜻하는 sentinel '0000-00-00'.
+    /// (모든 실제 날짜 문자열이 이보다 사전순 크므로 전체 포함)
+    fn cutoff_bound(days: u64) -> String {
+        if days == 0 {
+            "0000-00-00".to_string()
+        } else {
+            Self::days_cutoff(days)
+        }
+    }
+
+    /// 개요 집계: (세션수, 총토큰, 총툴콜, 총파일변경)
+    pub fn aggregate_totals(&self, days: u64) -> Result<(i64, i64, i64, i64)> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*), COALESCE(SUM(total_tokens),0), \
+             COALESCE(SUM(tool_call_count),0), COALESCE(SUM(file_change_count),0) \
+             FROM sessions WHERE date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let row = stmt.query_row(params![cutoff], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        }).map_err(|e| Error::Sqlite(e))?;
+        Ok(row)
+    }
+
+    /// 날짜 범위 (min, max)
+    pub fn date_range(&self, days: u64) -> Result<(Option<String>, Option<String>)> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT MIN(date), MAX(date) FROM sessions WHERE date IS NOT NULL AND date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let r = stmt.query_row(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(r)
+    }
+
+    /// 고유 프로젝트(git_origin_url) 수
+    pub fn distinct_projects(&self, days: u64) -> Result<i64> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(DISTINCT git_origin_url) FROM sessions \
+             WHERE git_origin_url IS NOT NULL AND git_origin_url <> '' AND date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let n = stmt.query_row(params![cutoff], |r| r.get(0))
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(n)
+    }
+
+    /// 고유 tool/skill 수
+    pub fn distinct_tools(&self, days: u64) -> Result<i64> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(DISTINCT u.tool_name) FROM tool_usage u \
+             JOIN sessions s ON s.session_id = u.session_id WHERE s.date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let n = stmt.query_row(params![cutoff], |r| r.get(0))
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(n)
+    }
+
+    /// tool/skill 순위 (name, 총 호출수). ascending=false: 많이 쓴 순.
+    fn tools_ranked(&self, days: u64, limit: i64, ascending: bool) -> Result<Vec<(String, i64)>> {
+        let dir = if ascending { "ASC" } else { "DESC" };
+        let cutoff = Self::cutoff_bound(days);
+        let sql = format!(
+            "SELECT u.tool_name, SUM(u.call_count) AS n \
+             FROM tool_usage u JOIN sessions s ON s.session_id = u.session_id \
+             WHERE s.date >= ?1 AND u.call_count > 0 \
+             GROUP BY u.tool_name ORDER BY n {dir}, u.tool_name LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff, limit], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 많이 쓴 tool/skill 순
+    pub fn top_tools(&self, days: u64, limit: i64) -> Result<Vec<(String, i64)>> {
+        self.tools_ranked(days, limit, false)
+    }
+
+    /// 적게 쓴 tool/skill 순
+    pub fn bottom_tools(&self, days: u64, limit: i64) -> Result<Vec<(String, i64)>> {
+        self.tools_ranked(days, limit, true)
+    }
+
+    /// 상위 프로젝트 (git_origin_url, 세션수, 토큰합)
+    pub fn top_projects(&self, days: u64, limit: i64) -> Result<Vec<(String, i64, i64)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT git_origin_url, COUNT(*) AS c, COALESCE(SUM(total_tokens),0) \
+             FROM sessions WHERE git_origin_url IS NOT NULL AND git_origin_url <> '' AND date >= ?1 \
+             GROUP BY git_origin_url ORDER BY c DESC, git_origin_url LIMIT ?2"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 토큰 상위 세션 (session_id, date, tokens, tool_calls, first_user_prompt)
+    pub fn top_sessions_by_tokens(
+        &self,
+        days: u64,
+        limit: i64,
+    ) -> Result<Vec<(String, Option<String>, i64, i64, Option<String>)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, date, total_tokens, tool_call_count, first_user_prompt \
+             FROM sessions WHERE total_tokens > 0 AND date >= ?1 \
+             ORDER BY total_tokens DESC LIMIT ?2"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        }).map_err(|e| Error::Sqlite(e))?
+          .collect::<rusqlite::Result<Vec<_>>>()
+          .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 요일별 세션 수 (0=일요일..6=토요일)
+    pub fn activity_by_weekday(&self, days: u64) -> Result<Vec<(i64, i64)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(strftime('%w', date) AS INTEGER) AS wd, COUNT(*) \
+             FROM sessions WHERE date IS NOT NULL AND date >= ?1 GROUP BY wd ORDER BY wd"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 윈도우 내 session_id 목록 (피크 시각 분석용)
+    pub fn session_ids_in_window(&self, days: u64) -> Result<Vec<String>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM sessions WHERE session_id IS NOT NULL AND date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0))
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// first_user_prompt 목록 (단어 빈도 분석용)
+    pub fn first_user_prompts(&self, days: u64) -> Result<Vec<String>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT first_user_prompt FROM sessions \
+             WHERE first_user_prompt IS NOT NULL AND first_user_prompt <> '' AND date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0))
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
     /// 트랜잭션 시작
     pub fn begin_transaction(&self) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])
@@ -493,9 +710,68 @@ mod tests {
             has_user_event: true,
             size_bytes: 0,
             indexed_at: Some(Utc::now()),
+            tool_usage: HashMap::new(),
         };
 
         db.upsert_session(&meta).unwrap();
         assert_eq!(db.count_sessions().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_tool_usage_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let db = SessionDb::new(&db_path).unwrap();
+
+        let mut tools = HashMap::new();
+        tools.insert("exec_command".to_string(), 12);
+        tools.insert("apply_patch".to_string(), 3);
+
+        let meta = CodexSessionMeta {
+            path: PathBuf::from("/test/rollout-2026-01-01T12-00-00-uuid.jsonl"),
+            filename: "rollout-2026-01-01T12-00-00-uuid.jsonl".to_string(),
+            session_id: "2026-01-01T12-00-00-uuid".to_string(),
+            date: Some("2026-01-01".to_string()),
+            cwd: Some("/test".to_string()),
+            first_user_prompt: Some("test prompt".to_string()),
+            model_provider: Some("openai".to_string()),
+            cli_version: Some("1.0.0".to_string()),
+            source: Some("test".to_string()),
+            model: Some("gpt-4".to_string()),
+            git_sha: None,
+            git_branch: Some("main".to_string()),
+            git_origin_url: Some("https://github.com/test/repo.git".to_string()),
+            tool_call_count: 15,
+            file_change_count: 0,
+            total_tokens: 500,
+            line_count: 0,
+            corrupt_lines: 0,
+            has_user_event: true,
+            size_bytes: 0,
+            indexed_at: Some(Utc::now()),
+            tool_usage: tools.clone(),
+        };
+
+        db.upsert_session(&meta).unwrap();
+
+        // 많이 쓴 순 → exec_command(12)가 apply_patch(3)보다 선행
+        let top = db.top_tools(0, 10).unwrap();
+        assert_eq!(top.first().map(|(n, _)| n.as_str()), Some("exec_command"));
+        assert_eq!(top.len(), 2);
+
+        // 적게 쓴 순 → apply_patch(3) 선행
+        let bot = db.bottom_tools(0, 10).unwrap();
+        assert_eq!(bot.first().map(|(n, _)| n.as_str()), Some("apply_patch"));
+
+        // 재 upsert(빈 map) 시 이전 tool_usage 행 제거
+        let mut meta2 = meta.clone();
+        meta2.tool_usage = HashMap::new();
+        db.upsert_session(&meta2).unwrap();
+        assert!(db.top_tools(0, 10).unwrap().is_empty());
+
+        // 고유 tool 수 / 프로젝트 집계
+        db.upsert_session(&meta).unwrap();
+        assert_eq!(db.distinct_tools(0).unwrap(), 2);
+        assert_eq!(db.distinct_projects(0).unwrap(), 1);
     }
 }

@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 불용어 목록
-const STOP_WORDS: &[&str] = &[
+/// 불용어 목록 (insights 단어 빈도 분석에서도 재사용)
+pub(crate) const STOP_WORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for", "from",
     "has", "have", "i", "if", "in", "is", "it", "json", "me", "my", "of", "on",
     "or", "path", "please", "python", "python3", "read", "session", "sessions",

@@ -121,6 +121,7 @@ impl CodexScanner {
             has_user_event: false,
             size_bytes,
             indexed_at: None,
+            tool_usage: std::collections::HashMap::new(),
         };
 
         let mut found_first_prompt = false;
@@ -135,36 +136,30 @@ impl CodexScanner {
 
             meta.line_count += 1;
 
-            // 첫 번째 사용자 프롬프트 추출 (최초 1회만)
+            // 첫 번째 사용자 프롬프트 추출 (유효한 첫 user 메시지).
+            // 실제 포맷: type==response_item → payload.type=="message" && payload.role=="user",
+            // payload.content[] 의 text 필드들. 주입 컨텍스트(AGENTS.md 등)는 건너뛴다.
             if !found_first_prompt {
                 if let Ok(record) = serde_json::from_str::<serde_json::Value>(line) {
-                    if let Some(record_type) = record.get("type").and_then(|t| t.as_str()) {
-                        if record_type == "response_item" {
-                            if let Some(payload) = record.get("payload") {
-                                if let Some(content) = payload.get("content").and_then(|c| c.as_array()) {
-                                    for item in content {
-                                        if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
-                                            if item_type == "message" {
-                                                let role = item.get("role").and_then(|r| r.as_str());
-                                                if role == Some("user") {
-                                                    if let Some(item_content) = item.get("content").and_then(|c| c.as_array()) {
-                                                        let texts: Vec<String> = item_content.iter()
-                                                            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
-                                                            .map(|s| s.to_string())
-                                                            .collect();
+                    let payload = record.get("payload");
+                    let is_user_msg = record.get("type").and_then(|t| t.as_str()) == Some("response_item")
+                        && payload.and_then(|p| p.get("type")).and_then(|t| t.as_str()) == Some("message")
+                        && payload.and_then(|p| p.get("role")).and_then(|t| t.as_str()) == Some("user");
 
-                                                        if !texts.is_empty() {
-                                                            let prompt = texts.join("\n");
-                                                            meta.first_user_prompt = Some(prompt.chars().take(2000).collect());
-                                                            found_first_prompt = true;
-                                                        }
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                    if is_user_msg {
+                        let texts: Vec<String> = payload
+                            .and_then(|p| p.get("content"))
+                            .and_then(|c| c.as_array())
+                            .map(|arr| arr.iter()
+                                .filter_map(|item| item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                                .collect())
+                            .unwrap_or_default();
+
+                        if !texts.is_empty() {
+                            let prompt = texts.join("\n");
+                            if !looks_like_injected_context(&prompt) {
+                                meta.first_user_prompt = Some(prompt.chars().take(2000).collect());
+                                found_first_prompt = true;
                             }
                         }
                     }
@@ -202,6 +197,10 @@ impl CodexScanner {
                         let item_type = payload.get("type").and_then(|v| v.as_str());
                         if item_type == Some("function_call") || item_type == Some("custom_tool_call") {
                             meta.tool_call_count += 1;
+                            // tool/skill 이름 집계 (있다면)
+                            if let Some(name) = payload.get("name").and_then(|v| v.as_str()) {
+                                *meta.tool_usage.entry(name.to_string()).or_insert(0) += 1;
+                            }
                         }
 
                         // 토큰 수 집계
@@ -310,6 +309,19 @@ impl CodexScanner {
     }
 }
 
+/// 주입 컨텍스트(AGENTS.md, 시스템 지시문 등) 휴리스틱 감지.
+/// first_user_prompt 노이즈 제거용 — 진짜 사용자 프롬프트를 찾을 때까지 건너뛴다.
+fn looks_like_injected_context(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let lower = text.to_ascii_lowercase();
+    trimmed.starts_with("# agents.md")
+        || lower.contains("agents.md instructions")
+        || lower.contains("<instructions>")
+        || lower.contains("<user_instructions>")
+        || lower.contains("<system")
+        || lower.contains("<environment_context>")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,11 +342,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let test_file = dir.path().join("rollout-2026-03-03T14-37-44-test.jsonl");
 
-        let test_content = r#"{"type":"session_meta","payload":{"cwd":"/test","model_provider":"test-provider","cli_version":"1.0.0","git":{"commit_hash":"abc123","branch":"main"}}}
-{"type":"response_item","payload":{"type":"function_call"}}
+        // 실제 포맷: payload.type=="message"+role=="user"+content[].type=="input_text"
+        // r##"..."## 사용: 본문에 "# 가 포함되어 r#" 가 조기 종료되는 것을 방지
+        let test_content = r##"{"type":"session_meta","payload":{"cwd":"/test","model_provider":"test-provider","cli_version":"1.0.0","git":{"commit_hash":"abc123","branch":"main"}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /test\n\n<INSTRUCTIONS>\n..."}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the login bug in auth.rs"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch"}}
 {"type":"event_msg","payload":{"type":"task_started","model_context_window":"gpt-4"}}
 {"type":"response_item","payload":{"usage":{"input_tokens":100,"output_tokens":50}}}
-"#;
+"##;
 
         std::fs::write(&test_file, test_content).unwrap();
 
@@ -344,7 +361,12 @@ mod tests {
 
         assert_eq!(meta.cwd, Some("/test".to_string()));
         assert_eq!(meta.model_provider, Some("test-provider".to_string()));
-        assert_eq!(meta.tool_call_count, 1);
+        assert_eq!(meta.tool_call_count, 2);
+        // 주입 컨텍스트를 건너뛰고 진짜 프롬프트 추출
+        assert_eq!(meta.first_user_prompt.as_deref(), Some("Fix the login bug in auth.rs"));
+        // tool 이름 집계
+        assert_eq!(meta.tool_usage.get("exec_command"), Some(&1));
+        assert_eq!(meta.tool_usage.get("apply_patch"), Some(&1));
         assert_eq!(meta.has_user_event, true);
         assert_eq!(meta.total_tokens, 150);
     }

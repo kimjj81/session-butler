@@ -135,6 +135,21 @@ pub enum Commands {
         days: u64,
     },
 
+    /// Codex: usage insights (tools/skills, projects, trends, words) from indexed data
+    Insights {
+        /// Time window in days (0 = all time)
+        #[arg(short = 'd', long, default_value = "0")]
+        days: u64,
+
+        /// Top-N per ranking
+        #[arg(short = 'n', long, default_value = "15")]
+        top: usize,
+
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Codex: compaction + sensitive-info (.env/token/key) scan
     Compact {
         /// Target days
@@ -288,6 +303,13 @@ pub fn run(cli: Cli) -> Result<()> {
             let archiver = SessionArchiver::new(config);
             let sessions = db.list_sessions_for_display(days)?;
             archiver.show_stats(&sessions)?;
+        }
+
+        Commands::Insights { days, top, json } => {
+            if backend_disabled(&config, Backend::Codex) {
+                return Ok(());
+            }
+            crate::insights::run(config, days, top, json)?;
         }
 
         Commands::Compact { days, dry_run, scan_sensitive } => {

@@ -1,4 +1,6 @@
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # Python (prototype removed; keep ignores for safety)
 __pycache__/

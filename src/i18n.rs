@@ -179,6 +179,7 @@ pub fn tui_desc(id: &str) -> &'static str {
         (Lang::Ko, "stats") => "세션 통계 표시",
         (Lang::Ko, "compact") => "세션 compaction 및 민감정보 탐지",
         (Lang::Ko, "summarize") => "Hermes 세션 요약 및 FTS5 인덱스",
+        (Lang::Ko, "insights") => "사용 인사이트 (tool/프로젝트/추세/단어)",
         (Lang::Ko, "pipeline") => "전체 파이프라인 실행",
         (Lang::En, "scan") => "Scan Codex sessions & index to SQLite",
         (Lang::En, "archive") => "zstd compress (--move deletes originals)",
@@ -187,7 +188,89 @@ pub fn tui_desc(id: &str) -> &'static str {
         (Lang::En, "stats") => "Session statistics",
         (Lang::En, "compact") => "Compaction + sensitive-info scan",
         (Lang::En, "summarize") => "Summarize Hermes sessions + FTS5",
+        (Lang::En, "insights") => "Usage insights (tools/projects/trends/words)",
         (Lang::En, "pipeline") => "Run the full pipeline",
+        _ => "",
+    }
+}
+
+// ---- 인사이트 리포트 문자열 ----
+
+pub fn insights_title() -> &'static str {
+    match lang() {
+        Lang::Ko => "사용 인사이트 (Usage Insights)",
+        Lang::En => "Usage Insights",
+    }
+}
+
+pub fn insights_empty() -> &'static str {
+    match lang() {
+        Lang::Ko => "데이터 없음 — 먼저 scan을 실행해 색인하세요.",
+        Lang::En => "No data — run scan to index sessions first.",
+    }
+}
+
+pub fn insights_window(days: u64) -> String {
+    match lang() {
+        Lang::Ko => {
+            if days == 0 {
+                "기간: 전체 기간 (0=전체)".to_string()
+            } else {
+                format!("기간: 최근 {}일", days)
+            }
+        }
+        Lang::En => {
+            if days == 0 {
+                "Window: all time (0=all)".to_string()
+            } else {
+                format!("Window: last {} days", days)
+            }
+        }
+    }
+}
+
+/// 인사이트 섹션 헤더/라벨. 미지정 id → 빈 문자열.
+pub fn insights_section(id: &str) -> &'static str {
+    match (lang(), id) {
+        (Lang::Ko, "overview") => "개요",
+        (Lang::Ko, "top_tools") => "자주 쓴 tool/skill",
+        (Lang::Ko, "least_tools") => "덜 쓴 tool/skill",
+        (Lang::Ko, "projects") => "프로젝트별",
+        (Lang::Ko, "trend") => "월별 추세",
+        (Lang::Ko, "activity") => "요일별 활동",
+        (Lang::Ko, "words") => "자주 쓴 단어",
+        (Lang::Ko, "leaders") => "토큰 상위 세션",
+        (Lang::Ko, "sessions") => "세션",
+        (Lang::Ko, "tokens") => "토큰",
+        (Lang::Ko, "tool_calls") => "툴 호출",
+        (Lang::Ko, "file_changes") => "파일 변경",
+        (Lang::Ko, "projects_lbl") => "프로젝트",
+        (Lang::Ko, "tools_distinct") => "tool 종류",
+        (Lang::Ko, "archived") => "보관(archived)",
+        (Lang::Ko, "date_range") => "기간",
+        (Lang::Ko, "peak_hour") => "피크 시간",
+        (Lang::Ko, "repo") => "repo",
+        (Lang::Ko, "month") => "월",
+
+        (Lang::En, "overview") => "Overview",
+        (Lang::En, "top_tools") => "Most-used tools/skills",
+        (Lang::En, "least_tools") => "Least-used tools/skills",
+        (Lang::En, "projects") => "By project",
+        (Lang::En, "trend") => "Monthly trend",
+        (Lang::En, "activity") => "Activity by weekday",
+        (Lang::En, "words") => "Top words",
+        (Lang::En, "leaders") => "Top sessions by tokens",
+        (Lang::En, "sessions") => "Sessions",
+        (Lang::En, "tokens") => "Tokens",
+        (Lang::En, "tool_calls") => "Tool calls",
+        (Lang::En, "file_changes") => "File changes",
+        (Lang::En, "projects_lbl") => "Projects",
+        (Lang::En, "tools_distinct") => "Distinct tools",
+        (Lang::En, "archived") => "Archived",
+        (Lang::En, "date_range") => "Date range",
+        (Lang::En, "peak_hour") => "Peak hour",
+        (Lang::En, "repo") => "repo",
+        (Lang::En, "month") => "Month",
         _ => "",
     }
 }

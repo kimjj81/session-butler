@@ -226,6 +226,20 @@ impl CodexScanner {
                             }
                         } else if event_type == Some("patch_apply_end") {
                             meta.file_change_count += 1;
+                        } else if event_type == Some("token_count") {
+                            // payload.info.total_token_usage.total_tokens 는
+                            // 세션 누적 토큰(이벤트가 주기적 스냅샷으로 여러 번 발생).
+                            // 누적값이므로 합이 아닌 max 로 세션 총토큰을 취한다.
+                            if let Some(total) = payload
+                                .get("info")
+                                .and_then(|i| i.get("total_token_usage"))
+                                .and_then(|t| t.get("total_tokens"))
+                                .and_then(|v| v.as_u64())
+                            {
+                                if (total as usize) > meta.total_tokens {
+                                    meta.total_tokens = total as usize;
+                                }
+                            }
                         }
                     }
                 }
@@ -350,7 +364,7 @@ mod tests {
 {"type":"response_item","payload":{"type":"function_call","name":"exec_command"}}
 {"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch"}}
 {"type":"event_msg","payload":{"type":"task_started","model_context_window":"gpt-4"}}
-{"type":"response_item","payload":{"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"input_tokens":600,"output_tokens":150,"total_tokens":750}}}}
 "##;
 
         std::fs::write(&test_file, test_content).unwrap();
@@ -368,6 +382,6 @@ mod tests {
         assert_eq!(meta.tool_usage.get("exec_command"), Some(&1));
         assert_eq!(meta.tool_usage.get("apply_patch"), Some(&1));
         assert_eq!(meta.has_user_event, true);
-        assert_eq!(meta.total_tokens, 150);
+        assert_eq!(meta.total_tokens, 1500);
     }
 }

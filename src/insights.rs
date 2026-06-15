@@ -263,9 +263,9 @@ fn render_text(r: &Report) {
     } else {
         for s in &r.token_leaders {
             let date = s.date.as_deref().unwrap_or("-");
-            let prompt = s.prompt.as_deref().map(|p| truncate(p, 50)).unwrap_or_default();
-            println!("  {} [{}] {} {} | {}",
-                truncate(&s.session_id, 26), date, fmt_tokens(s.tokens), label("tool_calls"), prompt);
+            let prompt = s.prompt.as_deref().map(|p| truncate(p, 60)).unwrap_or_default();
+            println!("  {} [{}] {} | {}",
+                truncate(&s.session_id, 26), date, fmt_tokens(s.tokens), prompt);
             println!("       {}: {}", label("tool_calls"), s.tool_calls);
         }
     }

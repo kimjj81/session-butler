@@ -84,8 +84,8 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// 압축 후 원본 .jsonl 삭제 (이동)
-        #[arg(long = "move")]
+        /// 압축 후 원본 .jsonl 삭제 (이동). scan 선행 필수 (--skip-scan과 충돌)
+        #[arg(long = "move", conflicts_with = "skip_scan")]
         move_: bool,
 
         /// archive 전 scan(인덱스 최신화) 건너뛰기

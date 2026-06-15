@@ -55,6 +55,9 @@ indicatif = "0.17"
 # SHA256 for checksums
 sha2 = "0.10"
 
+# stdout/stderr 캡처 (TUI에서 명령 출력을 버퍼로 받기 위함)
+gag = "1.0"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3.14"

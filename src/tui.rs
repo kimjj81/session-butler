@@ -606,17 +606,47 @@ impl TuiApp {
 
     fn execute_command(&mut self, command: Commands) -> Result<()> {
         self.state = TuiState::Running;
-        self.output_buffer = format!("Executing {:?}...\n", command);
 
-        // 실제 명령 실행 - 여기서 CLI 모듈의 run 함수 사용
-        // TUI에서 실행 시 stdout을 캡처해야 함
-        // 임시로 표시만 하고 실제 실행은 별도 스레드에서 처리 필요
-        self.output_buffer.push_str("Command executed successfully.\n");
+        // CLI run (config 파일 → 환경변수 → 기본값; TUI의 config와 동일 출처)
+        let cli = crate::cli::Cli {
+            command: command.clone(),
+            codex_sessions: None,
+            hermes_sessions: None,
+            codex_archive: None,
+            codex_index_db: None,
+            summary_layer: None,
+            fts5_index: None,
+            verbose: false,
+            no_codex: false,
+            no_hermes: false,
+        };
 
+        // stdout/stderr를 버퍼로 캡처 — TUI 레이아웃을 유지한 채 Results에 표시
+        use std::io::Read;
+        let mut output = String::new();
+        let result = {
+            let mut out_buf = gag::BufferRedirect::stdout()
+                .map_err(|e| Error::Other(format!("stdout 캡처 실패: {}", e)))?;
+            let mut err_buf = gag::BufferRedirect::stderr()
+                .map_err(|e| Error::Other(format!("stderr 캡처 실패: {}", e)))?;
+            let r = crate::cli::run(cli);
+            let _ = out_buf.read_to_string(&mut output);
+            let mut err_out = String::new();
+            let _ = err_buf.read_to_string(&mut err_out);
+            if !err_out.is_empty() {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&err_out);
+            }
+            r
+        };
+
+        self.output_buffer = output;
         self.execution_results.push(ExecutionResult {
-            success: true,
+            success: result.is_ok(),
             output: self.output_buffer.clone(),
-            error: None,
+            error: result.err().map(|e| e.to_string()),
         });
 
         self.state = TuiState::Results;

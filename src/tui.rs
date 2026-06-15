@@ -3,6 +3,7 @@
 use crate::cli::Commands;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::types::Backend;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
@@ -58,6 +59,7 @@ pub struct MenuItem {
     pub description: String,
     pub command: Commands,
     pub args: Vec<Arg>,
+    pub backend: Backend,
 }
 
 /// 명령 인자
@@ -77,25 +79,6 @@ pub enum ArgType {
     Text,
     Flag,
     Path,
-}
-
-/// 메뉴/기능이 속한 백엔드
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Backend {
-    Codex,
-    Hermes,
-    Both,
-}
-
-impl Backend {
-    /// 주어진 설정에서 이 백엔드를 노출할지
-    fn visible(self, config: &Config) -> bool {
-        match self {
-            Backend::Codex => config.enabled_codex,
-            Backend::Hermes => config.enabled_hermes,
-            Backend::Both => config.enabled_codex || config.enabled_hermes,
-        }
-    }
 }
 
 /// 실행 결과
@@ -128,15 +111,16 @@ impl TuiApp {
         let menu_items = vec![
             MenuItem {
                 id: "scan".to_string(),
-                title: "Phase 1: Scan".to_string(),
+                title: "Scan".to_string(),
                 description: "Codex 세션 스캔 및 SQLite 인덱싱".to_string(),
                 command: Commands::Scan { analyze: true },
                 args: vec![],
+                backend: Backend::Codex,
             },
             MenuItem {
                 id: "archive".to_string(),
-                title: "Phase 2: Archive".to_string(),
-                description: "zstd 압축 및 checksum 생성".to_string(),
+                title: "Archive".to_string(),
+                description: "zstd 압축 (--move 원본 삭제)".to_string(),
                 command: Commands::Archive { days: 30, dry_run: false, move_: false, skip_scan: false },
                 args: vec![
                     Arg {
@@ -153,12 +137,27 @@ impl TuiApp {
                         value: "false".to_string(),
                         arg_type: ArgType::Flag,
                     },
+                    Arg {
+                        name: "move".to_string(),
+                        description: "압축 후 원본 삭제".to_string(),
+                        default_value: "false".to_string(),
+                        value: "false".to_string(),
+                        arg_type: ArgType::Flag,
+                    },
+                    Arg {
+                        name: "skip_scan".to_string(),
+                        description: "사전 스캔 생략".to_string(),
+                        default_value: "false".to_string(),
+                        value: "false".to_string(),
+                        arg_type: ArgType::Flag,
+                    },
                 ],
+                backend: Backend::Codex,
             },
             MenuItem {
                 id: "restore".to_string(),
-                title: "Phase 2: Restore".to_string(),
-                description: "압축 파일 복원".to_string(),
+                title: "Restore".to_string(),
+                description: "압축 파일 복원 (--purge 보관본 삭제)".to_string(),
                 command: Commands::Restore {
                     session_id: None,
                     all: false,
@@ -181,11 +180,19 @@ impl TuiApp {
                         value: "false".to_string(),
                         arg_type: ArgType::Flag,
                     },
+                    Arg {
+                        name: "purge".to_string(),
+                        description: "복원 후 보관본 삭제".to_string(),
+                        default_value: "false".to_string(),
+                        value: "false".to_string(),
+                        arg_type: ArgType::Flag,
+                    },
                 ],
+                backend: Backend::Codex,
             },
             MenuItem {
                 id: "list".to_string(),
-                title: "Phase 2: List".to_string(),
+                title: "List".to_string(),
                 description: "세션 목록 표시".to_string(),
                 command: Commands::List { days: 30, json: false },
                 args: vec![
@@ -204,10 +211,11 @@ impl TuiApp {
                         arg_type: ArgType::Flag,
                     },
                 ],
+                backend: Backend::Codex,
             },
             MenuItem {
                 id: "stats".to_string(),
-                title: "Phase 2: Stats".to_string(),
+                title: "Stats".to_string(),
                 description: "세션 통계 표시".to_string(),
                 command: Commands::Stats { days: 30 },
                 args: vec![
@@ -219,10 +227,11 @@ impl TuiApp {
                         arg_type: ArgType::Number,
                     },
                 ],
+                backend: Backend::Codex,
             },
             MenuItem {
                 id: "compact".to_string(),
-                title: "Phase 3: Compact".to_string(),
+                title: "Compact".to_string(),
                 description: "세션 compaction 및 민감정보 탐지".to_string(),
                 command: Commands::Compact {
                     days: 0,
@@ -252,10 +261,11 @@ impl TuiApp {
                         arg_type: ArgType::Flag,
                     },
                 ],
+                backend: Backend::Codex,
             },
             MenuItem {
                 id: "summarize".to_string(),
-                title: "Phase 4: Summarize".to_string(),
+                title: "Summarize".to_string(),
                 description: "Hermes 세션 요약 및 FTS5 인덱스".to_string(),
                 command: Commands::Summarize {
                     summary_only: false,
@@ -277,6 +287,7 @@ impl TuiApp {
                         arg_type: ArgType::Flag,
                     },
                 ],
+                backend: Backend::Hermes,
             },
             MenuItem {
                 id: "pipeline".to_string(),
@@ -306,6 +317,7 @@ impl TuiApp {
                         arg_type: ArgType::Flag,
                     },
                 ],
+                backend: Backend::Both,
             },
         ];
 
@@ -329,22 +341,13 @@ impl TuiApp {
         items.get(self.selected_index).copied()
     }
 
-    /// 메뉴 id → 백엔드 매핑
-    fn item_backend(id: &str) -> Backend {
-        match id {
-            "summarize" => Backend::Hermes,
-            "pipeline" => Backend::Both,
-            _ => Backend::Codex,
-        }
-    }
-
     fn get_filtered_items(&self) -> Vec<&MenuItem> {
         let filter = self.filter_text.to_lowercase();
         self.menu_items
             .iter()
             .filter(|item| {
                 // 활성 백엔드만 노출
-                if !Self::item_backend(&item.id).visible(&self.config) {
+                if !item.backend.is_enabled(&self.config) {
                     return false;
                 }
                 // 텍스트 필터

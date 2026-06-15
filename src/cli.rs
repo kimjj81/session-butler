@@ -7,7 +7,7 @@ use crate::db::SessionDb;
 use crate::error::Result;
 use crate::scanner::CodexScanner;
 use crate::summary::SummaryBuilder;
-use crate::types::SessionInfo;
+use crate::types::{Backend, SessionInfo};
 use clap::{Parser, Subcommand};
 
 /// Session Butler - Codex/Hermes 세션 파일 관리 도구
@@ -194,7 +194,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Scan { analyze } => {
-            if backend_disabled(&config, "codex") {
+            if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
             let scanner = CodexScanner::new(config);
@@ -207,7 +207,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Archive { days, dry_run, move_, skip_scan } => {
-            if backend_disabled(&config, "codex") {
+            if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
             // 항상 scan 선행하여 인덱스 최신화 (--skip-scan으로 건너뛰기)
@@ -220,12 +220,15 @@ pub fn run(cli: Cli) -> Result<()> {
             let archiver = SessionArchiver::new(config);
             // DB 기반 대상 선정 (archived=0, 최근 days일)
             let sessions = db.list_active_by_days(days)?;
+            if skip_scan && sessions.is_empty() && db.count_sessions()? == 0 {
+                eprintln!("경고: DB 인덱스가 비어 있습니다. scan을 먼저 실행하거나 --skip-scan을 제거하세요.");
+            }
             let filtered: Vec<&SessionInfo> = sessions.iter().collect();
             archiver.archive(&filtered, dry_run, move_, &db)?;
         }
 
         Commands::Restore { session_id, all, days, dry_run, purge } => {
-            if backend_disabled(&config, "codex") {
+            if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
             let db = SessionDb::new(&config.codex_index_db)?;
@@ -244,29 +247,27 @@ pub fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::List { days, json } => {
-            if backend_disabled(&config, "codex") {
+            if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
+            let db = SessionDb::new(&config.codex_index_db)?;
             let archiver = SessionArchiver::new(config);
-            let sessions = archiver.discover_sessions()?;
-            let filtered_refs = archiver.filter_by_days(&sessions, days);
-            let filtered: Vec<_> = filtered_refs.into_iter().cloned().collect();
-            archiver.list_sessions(&filtered, json)?;
+            let sessions = db.list_sessions_for_display(days)?;
+            archiver.list_sessions(&sessions, json)?;
         }
 
         Commands::Stats { days } => {
-            if backend_disabled(&config, "codex") {
+            if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
+            let db = SessionDb::new(&config.codex_index_db)?;
             let archiver = SessionArchiver::new(config);
-            let sessions = archiver.discover_sessions()?;
-            let filtered_refs = archiver.filter_by_days(&sessions, days);
-            let filtered: Vec<_> = filtered_refs.into_iter().cloned().collect();
-            archiver.show_stats(&filtered)?;
+            let sessions = db.list_sessions_for_display(days)?;
+            archiver.show_stats(&sessions)?;
         }
 
         Commands::Compact { days, dry_run, scan_sensitive } => {
-            if backend_disabled(&config, "codex") {
+            if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
             let compactor = SessionCompactor::new(config)?;
@@ -287,7 +288,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Summarize { summary_only, fts_only } => {
-            if backend_disabled(&config, "hermes") {
+            if backend_disabled(&config, Backend::Hermes) {
                 return Ok(());
             }
             let builder = SummaryBuilder::new(config)?;
@@ -391,26 +392,32 @@ fn build_config(cli: &Cli) -> Config {
 }
 
 /// 백엔드가 비활성이면 경고하고 true 반환 (no-op 처리용)
-fn backend_disabled(config: &Config, backend: &str) -> bool {
-    let disabled = match backend {
-        "codex" => !config.enabled_codex,
-        "hermes" => !config.enabled_hermes,
-        _ => false,
-    };
-    if disabled {
-        eprintln!("{} 백엔드 비활성 — 건너뜁니다 (--no-{} 또는 CODEX/HERMES_ENABLED 확인)", backend, backend);
+fn backend_disabled(config: &Config, backend: Backend) -> bool {
+    if backend.is_enabled(config) {
+        false
+    } else {
+        let name = match backend {
+            Backend::Codex => "codex",
+            Backend::Hermes => "hermes",
+            Backend::Both => "both",
+        };
+        eprintln!("{} 백엔드 비활성 — 건너뜁니다 (--no-{} 또는 CODEX/HERMES_ENABLED 확인)", name, name);
+        true
     }
-    disabled
 }
 
-/// 경로 확장 (~를 홈 디렉토리로)
+/// 경로 확장 (~ 확장 + 상대경로를 current_dir 기준 절대화)
 fn expand_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]);
-        }
+    let expanded: PathBuf = if path.starts_with("~/") {
+        dirs::home_dir().map(|h| h.join(&path[2..])).unwrap_or_else(|| PathBuf::from(path))
+    } else {
+        PathBuf::from(path)
+    };
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&expanded)
     }
-    PathBuf::from(path)
 }
 
 use std::path::PathBuf;

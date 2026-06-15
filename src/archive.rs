@@ -86,6 +86,7 @@ impl SessionArchiver {
                 session_id,
                 model_provider,
                 cli_version,
+                archived: false,
             });
         }
 
@@ -169,44 +170,70 @@ impl SessionArchiver {
                 .transpose()
                 .map_err(|e| Error::Io(e))?;
 
-            // 압축 실행
-            match self.compress_file(src, &zst_path) {
-                Ok(compressed_size) => {
-                    let checksum = self.sha256_file(src)?;
-
-                    // DB에 archived 상태 기록 (session_id 필수)
-                    if let Some(ref sid) = session.session_id {
-                        if let Err(e) = db.mark_archived(sid, &zst_path, &checksum) {
-                            eprintln!("ERROR marking archived {}: {}", src.display(), e);
-                        }
-                    } else {
-                        eprintln!("WARNING: {} session_id 없음, DB 상태 기록 생략", src.display());
-                    }
-
-                    // --move: 압축+DB 기록 성공 후에만 원본 삭제
-                    if move_originals {
-                        if let Err(e) = fs::remove_file(src) {
-                            eprintln!("WARNING: 원본 삭제 실패 {}: {}", src.display(), e);
-                        }
-                    }
-
-                    archived.push(ArchivedSession {
-                        original: src.clone(),
-                        compressed: zst_path.clone(),
-                        checksum_sha256: checksum,
-                        date: session.date.map(|d| d.to_string()),
-                        size_bytes: session.size_bytes,
-                        compressed_size_bytes: compressed_size,
-                    });
-
-                    total_original += session.size_bytes;
-                    total_compressed += compressed_size;
-                }
+            // 1. atomic 압축 + 체크섬 (src 1회 읽기)
+            let (compressed_size, checksum) = match self.compress_file(src, &zst_path) {
+                Ok(v) => v,
                 Err(e) => {
                     eprintln!("ERROR compressing {}: {}", src.display(), e);
                     skipped.push((**session).clone());
+                    continue;
+                }
+            };
+
+            // 2. session_id 필수 (DB 기록용). 없으면 보관본 정리하고 원본 보존.
+            let sid = match session.session_id {
+                Some(ref s) => s.clone(),
+                None => {
+                    eprintln!("WARNING: {} session_id 없음, 원본 보존하고 skip", src.display());
+                    let _ = fs::remove_file(&zst_path);
+                    skipped.push((**session).clone());
+                    continue;
+                }
+            };
+
+            // 3. --move: 원본 삭제. remove 성공이 DB 기록의 선행 조건.
+            //    실패 시 보관본 정리 + 원본 보존 + skip.
+            if move_originals {
+                if let Err(e) = fs::remove_file(src) {
+                    eprintln!("WARNING: 원본 삭제 실패, 보관본 정리하고 skip {}: {}", src.display(), e);
+                    let _ = fs::remove_file(&zst_path);
+                    skipped.push((**session).clone());
+                    continue;
                 }
             }
+
+            // 4. DB 기록 (per-file 트랜잭션 + 영향 행 수 검증).
+            //    실패 시: move 였으면 원본 이미 삭제됐으니 .zst 보존(재시도용)/ERROR,
+            //            move 아니면 .zst 정리 + 원본 보존.
+            let recorded = (|| -> Result<()> {
+                db.begin_transaction()?;
+                db.mark_archived(&sid, &zst_path, &checksum)?;
+                db.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = recorded {
+                let _ = db.rollback();
+                if move_originals {
+                    eprintln!("ERROR DB 기록 실패(원본 이미 삭제), .zst 보존 - 재시도 필요 {}: {}", src.display(), e);
+                } else {
+                    eprintln!("WARNING DB 기록 실패, 보관본 정리 {}: {}", src.display(), e);
+                    let _ = fs::remove_file(&zst_path);
+                }
+                skipped.push((**session).clone());
+                continue;
+            }
+
+            archived.push(ArchivedSession {
+                original: src.clone(),
+                compressed: zst_path.clone(),
+                checksum_sha256: checksum,
+                date: session.date.map(|d| d.to_string()),
+                size_bytes: session.size_bytes,
+                compressed_size_bytes: compressed_size,
+            });
+
+            total_original += session.size_bytes;
+            total_compressed += compressed_size;
         }
 
         // 요약 출력
@@ -236,28 +263,57 @@ impl SessionArchiver {
     }
 
     /// 파일 압축
-    fn compress_file(&self, src: &Path, dest: &Path) -> Result<u64> {
-        let src_file = File::open(src)
-            .map_err(|e| Error::Io(e))?;
-        let dest_file = File::create(dest)
-            .map_err(|e| Error::Io(e))?;
+    /// 파일 압축 (atomic: temp 파일에 쓰고 rename). (압축크기, src의 sha256) 반환.
+    fn compress_file(&self, src: &Path, dest: &Path) -> Result<(u64, String)> {
+        use sha2::{Digest, Sha256};
 
-        let mut encoder = Encoder::new(dest_file, self.compression_level)
-            .map_err(|e| Error::Compression(e.to_string()))?;
-        let mut reader = io::BufReader::new(src_file);
+        let tmp = PathBuf::from(format!("{}.part", dest.display()));
 
-        io::copy(&mut reader, &mut encoder)
-            .map_err(|e| Error::Io(e))?;
+        let result = (|| -> Result<(u64, String)> {
+            let src_file = File::open(src)
+                .map_err(|e| Error::Io(e))?;
+            let tmp_file = File::create(&tmp)
+                .map_err(|e| Error::Io(e))?;
 
-        let mut output = encoder.finish()
-            .map_err(|e| Error::Compression(e.to_string()))?;
+            let mut encoder = Encoder::new(tmp_file, self.compression_level)
+                .map_err(|e| Error::Compression(e.to_string()))?;
+            let mut reader = io::BufReader::new(src_file);
+            let mut hasher = Sha256::new();
+            let mut buf = [0u8; 65536];
 
-        output.flush()
-            .map_err(|e| Error::Io(e))?;
+            loop {
+                let n = reader.read(&mut buf)
+                    .map_err(|e| Error::Io(e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder.write_all(&buf[..n])
+                    .map_err(|e| Error::Io(e))?;
+            }
 
-        Ok(fs::metadata(dest)
-            .map_err(|e| Error::Io(e))?
-            .len())
+            let mut output = encoder.finish()
+                .map_err(|e| Error::Compression(e.to_string()))?;
+            output.flush()
+                .map_err(|e| Error::Io(e))?;
+
+            Ok((0, format!("{:x}", hasher.finalize())))
+        })();
+
+        match result {
+            Ok((_, checksum)) => {
+                fs::rename(&tmp, dest)
+                    .map_err(|e| Error::Io(e))?;
+                let compressed = fs::metadata(dest)
+                    .map_err(|e| Error::Io(e))?
+                    .len();
+                Ok((compressed, checksum))
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     /// 파일 압축 해제
@@ -323,6 +379,7 @@ impl SessionArchiver {
 
     /// 세션 복원 (DB의 archived 세션을 대상).
     /// discover_sessions()에 의존하지 않고 ArchivedSessionRow(compressed_path)를 직접 사용.
+    /// 무결성 실패 시 보관본(.zst)을 보존하고 손상된 복원본을 버린다(purge 금지).
     pub fn restore(&self, rows: &[ArchivedSessionRow], dry_run: bool, purge: bool, db: &SessionDb) -> Result<Vec<ArchivedSessionRow>> {
         let mut restored = Vec::new();
 
@@ -332,6 +389,12 @@ impl SessionArchiver {
 
             if !zst.exists() {
                 eprintln!("WARNING: 보관본 없음, skip: {}", zst.display());
+                continue;
+            }
+
+            // 덮어쓰기 방지: dest가 이미 있으면 손상 위험으로 skip
+            if dest.exists() {
+                eprintln!("WARNING: 복원 대상 이미 존재, skip (덮어쓰지 않음): {}", dest.display());
                 continue;
             }
 
@@ -351,25 +414,38 @@ impl SessionArchiver {
 
             match self.decompress_file(zst, dest) {
                 Ok(_) => {
-                    // 무결성 검증 (체크섬이 있을 때)
+                    // 무결성 검증 (체크섬이 있을 때). 불일치면 손상 복원본 버리고 보관본 보존.
                     if !row.checksum_sha256.is_empty() {
-                        match self.sha256_file(dest) {
-                            Ok(actual) if actual == row.checksum_sha256 => {}
+                        let valid = match self.sha256_file(dest) {
+                            Ok(actual) if actual == row.checksum_sha256 => true,
                             Ok(actual) => {
-                                eprintln!("WARNING 체크섬 불일치 {}: expected {} got {}",
+                                eprintln!("WARNING 체크섬 불일치, 손상 복원본 정리+보관본 보존 {}: expected {} got {}",
                                     dest.display(), row.checksum_sha256, actual);
+                                false
                             }
-                            Err(e) => eprintln!("WARNING 체크섬 계산 실패 {}: {}", dest.display(), e),
+                            Err(e) => {
+                                eprintln!("WARNING 체크섬 계산 실패, 손상 복원본 정리+보관본 보존 {}: {}", dest.display(), e);
+                                false
+                            }
+                        };
+                        if !valid {
+                            let _ = fs::remove_file(dest); // 손상된 복원본 정리
+                            continue; // purge 금지, restored 제외
                         }
                     }
 
-                    // purge: 보관본 삭제 + DB archived 해제
+                    // purge: 보관본 삭제 성공 후에만 DB archived 해제.
                     if purge {
-                        if let Err(e) = fs::remove_file(zst) {
-                            eprintln!("WARNING 보관본 삭제 실패 {}: {}", zst.display(), e);
-                        }
-                        if let Err(e) = db.mark_purged(&row.session_id) {
-                            eprintln!("ERROR DB purge 표시 실패 {}: {}", row.session_id, e);
+                        match fs::remove_file(zst) {
+                            Ok(_) => {
+                                if let Err(e) = db.mark_purged(&row.session_id) {
+                                    eprintln!("ERROR DB purge 표시 실패 (보관본 이미 삭제, archived=1 잔류 - 재시도 필요) {}: {}", row.session_id, e);
+                                }
+                            }
+                            Err(e) => {
+                                // 보관본 삭제 실패 → archived=1 유지(재시도), 복원 자체는 성공
+                                eprintln!("ERROR 보관본 삭제 실패, archived=1 유지 {}: {}", zst.display(), e);
+                            }
                         }
                     }
 

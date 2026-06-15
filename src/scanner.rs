@@ -31,7 +31,7 @@ impl CodexScanner {
         self
     }
 
-    /// 모든 세션 스캔
+    /// 모든 세션 스캔 (WalkDir 1패스: 파일 수집 후 추출)
     pub fn scan_all(&self) -> Result<Vec<CodexSessionMeta>> {
         let sessions_dir = &self.config.codex_sessions;
 
@@ -39,54 +39,36 @@ impl CodexScanner {
             return Err(Error::PathNotFound(sessions_dir.clone()));
         }
 
-        let mut results = Vec::new();
-        let mut total_files = 0;
-        let mut processed = 0;
-
-        // 먼저 파일 수 계산
-        for entry in WalkDir::new(sessions_dir)
+        // 1패스: rollout-*.jsonl 파일 수집
+        let files: Vec<PathBuf> = WalkDir::new(sessions_dir)
             .follow_links(false)
             .into_iter()
             .filter_map(|e| e.ok())
-        {
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                let filename = entry.file_name().to_string_lossy();
-                if filename.starts_with("rollout-") {
-                    total_files += 1;
-                }
-            }
-        }
+            .filter(|entry| {
+                let path = entry.path();
+                path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                    && path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .starts_with("rollout-")
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect();
 
+        let total_files = files.len();
         if self.progress {
             println!("Found {} JSONL files", total_files);
         }
 
-        // 스캔 시작
-        for entry in WalkDir::new(sessions_dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-
-            let filename = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-
-            if !filename.starts_with("rollout-") {
-                continue;
-            }
-
-            processed += 1;
-
+        // 추출
+        let mut results = Vec::new();
+        for (processed, path) in files.iter().enumerate() {
+            let human_idx = processed + 1;
             match self.extract_session_meta(path) {
                 Ok(meta) => {
                     results.push(meta);
-                    if self.progress && processed % 500 == 0 {
-                        println!("  scanned {}/{}...", processed, total_files);
+                    if self.progress && human_idx % 500 == 0 {
+                        println!("  scanned {}/{}...", human_idx, total_files);
                     }
                 }
                 Err(e) => {

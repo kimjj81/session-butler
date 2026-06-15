@@ -30,6 +30,10 @@ impl SessionDb {
 
     /// 테이블 초기화
     fn init_tables(&self) -> Result<()> {
+        // crash-safety + 성능 (단일 연결이라 동시성 이점은 없지만 내구성 향상)
+        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .map_err(|e| Error::Sqlite(e))?;
+
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
@@ -221,9 +225,9 @@ impl SessionDb {
         (Utc::now() - chrono::Duration::days(days as i64)).date_naive().to_string()
     }
 
-    /// 세션을 archived로 표시 (보관본 경로/체크섬 기록)
+    /// 세션을 archived로 표시 (보관본 경로/체크섬 기록). 영향 행 수==1 검증.
     pub fn mark_archived(&self, session_id: &str, compressed_path: &Path, checksum: &str) -> Result<()> {
-        self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE sessions SET archived = 1, compressed_path = ?1, checksum_sha256 = ?2, archived_at = ?3
              WHERE session_id = ?4",
             params![
@@ -233,16 +237,22 @@ impl SessionDb {
                 session_id,
             ],
         ).map_err(|e| Error::Sqlite(e))?;
+        if n == 0 {
+            return Err(Error::Other(format!("mark_archived: session_id not found: {}", session_id)));
+        }
         Ok(())
     }
 
-    /// archived 해제 + 보관본 메타 제거 (restore --purge)
+    /// archived 해제 + 보관본 메타 제거 (restore --purge). 영향 행 수==1 검증.
     pub fn mark_purged(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE sessions SET archived = 0, compressed_path = NULL, checksum_sha256 = NULL, archived_at = NULL
              WHERE session_id = ?1",
             params![session_id],
         ).map_err(|e| Error::Sqlite(e))?;
+        if n == 0 {
+            return Err(Error::Other(format!("mark_purged: session_id not found: {}", session_id)));
+        }
         Ok(())
     }
 
@@ -315,6 +325,39 @@ impl SessionDb {
                 session_id,
                 model_provider,
                 cli_version,
+                archived: false,
+            })
+        }).map_err(|e| Error::Sqlite(e))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 최근 days일 이내의 전체 세션(archived 포함) 조회 (list/stats 표시용)
+    pub fn list_sessions_for_display(&self, days: u64) -> Result<Vec<SessionInfo>> {
+        let cutoff = Self::days_cutoff(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT path, date, size_bytes, session_id, model_provider, cli_version, archived
+             FROM sessions WHERE date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            let path: String = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+            let date_str: Option<String> = row.get(1)?;
+            let size_bytes: i64 = row.get(2).unwrap_or(0);
+            let session_id: Option<String> = row.get(3)?;
+            let model_provider: Option<String> = row.get(4)?;
+            let cli_version: Option<String> = row.get(5)?;
+            let archived: i64 = row.get(6).unwrap_or(0);
+            let date = date_str.as_deref()
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+            Ok(SessionInfo {
+                path: PathBuf::from(path),
+                date,
+                size_bytes: size_bytes as u64,
+                session_id,
+                model_provider,
+                cli_version,
+                archived: archived != 0,
             })
         }).map_err(|e| Error::Sqlite(e))?
         .collect::<std::result::Result<Vec<_>, _>>()

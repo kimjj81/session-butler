@@ -111,6 +111,27 @@ pub struct SessionInfo {
     pub session_id: Option<String>,
     pub model_provider: Option<String>,
     pub cli_version: Option<String>,
+    /// .zst 보관본 존재 여부
+    pub archived: bool,
+}
+
+/// 메뉴/기능이 속한 백엔드 (cli/tui 공유)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Backend {
+    Codex,
+    Hermes,
+    Both,
+}
+
+impl Backend {
+    /// 주어진 설정에서 이 백엔드가 활성인지
+    pub fn is_enabled(self, config: &crate::config::Config) -> bool {
+        match self {
+            Backend::Codex => config.enabled_codex,
+            Backend::Hermes => config.enabled_hermes,
+            Backend::Both => config.enabled_codex || config.enabled_hermes,
+        }
+    }
 }
 
 /// Hermes 세션 레코드

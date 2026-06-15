@@ -62,13 +62,6 @@ impl Config {
         }
     }
 
-    /// 환경변수로부터 설정 로드
-    pub fn from_env() -> Self {
-        let mut config = Self::new();
-        config.apply_env();
-        config
-    }
-
     /// 환경변수를 현재 설정에 적용 (우선순위: default → config 파일 → 환경변수)
     pub fn apply_env(&mut self) {
         if let Ok(path) = std::env::var("CODEX_SESSIONS") {
@@ -134,11 +127,14 @@ impl Config {
         let mut config: Config = serde_json::from_str(&content)
             .context("설정 파일 파싱 실패")?;
 
-        // 경로 확장
+        // 경로 확장 (절대화)
         config.codex_sessions = expand_path(config.codex_sessions.to_string_lossy().as_ref());
         config.codex_archive = expand_path(config.codex_archive.to_string_lossy().as_ref());
         config.hermes_sessions = expand_path(config.hermes_sessions.to_string_lossy().as_ref());
         config.codex_state_db = expand_path(config.codex_state_db.to_string_lossy().as_ref());
+        config.codex_index_db = expand_path(config.codex_index_db.to_string_lossy().as_ref());
+        config.summary_layer = expand_path(config.summary_layer.to_string_lossy().as_ref());
+        config.fts5_index = expand_path(config.fts5_index.to_string_lossy().as_ref());
 
         Ok(config)
     }
@@ -163,22 +159,31 @@ impl Config {
     }
 }
 
-/// ~를 홈 디렉토리로 확장
+/// ~ 확장 + 상대경로를 current_dir 기준 절대경로로 변환.
+/// DB에 저장하는 경로를 절대화해 cwd 무관하게 restore/재실행.
 fn expand_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]);
-        }
+    let expanded: PathBuf = if path.starts_with("~/") {
+        dirs::home_dir().map(|h| h.join(&path[2..])).unwrap_or_else(|| PathBuf::from(path))
+    } else {
+        PathBuf::from(path)
+    };
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&expanded)
     }
-    PathBuf::from(path)
 }
 
-/// 환경변수를 bool로 파싱 ("0"/"false"/"off"/"no" → false, 그 외 → true)
+/// 환경변수를 bool로 파싱. 빈 문자열은 미설정(None) 취급.
+/// "0"/"false"/"off"/"no" → false, 그 외 비어있지 않은 값 → true.
 fn parse_bool_env(key: &str) -> Option<bool> {
-    std::env::var(key).ok().map(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        !(v == "0" || v == "false" || v == "off" || v == "no")
-    })
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "off" || v == "no")
+        })
 }
 
 #[cfg(test)]

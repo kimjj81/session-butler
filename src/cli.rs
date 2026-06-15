@@ -5,6 +5,7 @@ use crate::compact::SessionCompactor;
 use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::Result;
+use crate::i18n;
 use crate::scanner::CodexScanner;
 use crate::summary::SummaryBuilder;
 use crate::types::{Backend, SessionInfo};
@@ -16,50 +17,50 @@ use clap::{Parser, Subcommand};
 #[command(author = "Kim Jeongjin")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(
-    about = "Codex/Hermes 세션 기록을 압축·보관·요약하는 도구",
-    long_about = "Codex 세션(rollout-*.jsonl)은 스캔·압축·복원·컴팩션으로 관리하고, \
-Hermes 세션(session_*.json)은 요약·키워드화해 검색 가능한 지식베이스로 만듭니다.\n\
-백엔드 활성화 우선순위: config 파일 → 환경변수(CODEX_ENABLED/HERMES_ENABLED) → \
+    about = "Compress, archive, and summarize Codex/Hermes session logs",
+    long_about = "Manages Codex sessions (rollout-*.jsonl) via scan/archive/restore/compact, \
+and summarizes Hermes sessions (session_*.json) into a searchable knowledge base.\n\
+Backend activation precedence: config file → env (CODEX_ENABLED/HERMES_ENABLED) → \
 --no-codex/--no-hermes"
 )]
 pub struct Cli {
-    /// 명령
+    /// Command
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Codex 세션 디렉토리
+    /// Codex sessions directory
     #[arg(short = 'C', long, global = true)]
     pub codex_sessions: Option<String>,
 
-    /// Hermes 세션 디렉토리
+    /// Hermes sessions directory
     #[arg(short = 'H', long, global = true)]
     pub hermes_sessions: Option<String>,
 
-    /// Codex 아카이브 디렉토리
+    /// Codex archive directory
     #[arg(short = 'A', long, global = true)]
     pub codex_archive: Option<String>,
 
-    /// Codex 인덱스 DB 경로
+    /// Codex index DB path
     #[arg(short = 'I', long, global = true)]
     pub codex_index_db: Option<String>,
 
-    /// 요약 레이어 JSON 경로
+    /// Summary layer JSON path
     #[arg(short = 'S', long, global = true)]
     pub summary_layer: Option<String>,
 
-    /// FTS5 인덱스 JSON 경로
+    /// FTS5 index JSON path
     #[arg(short = 'F', long, global = true)]
     pub fts5_index: Option<String>,
 
-    /// 상세 출력
+    /// Verbose output
     #[arg(short = 'v', long, global = true)]
     pub verbose: bool,
 
-    /// Codex 백엔드 비활성 (scan/archive/restore/list/stats/compact 건너뜀)
+    /// Disable Codex backend (skips scan/archive/restore/list/stats/compact)
     #[arg(long, global = true)]
     pub no_codex: bool,
 
-    /// Hermes 백엔드 비활성 (summarize 건너뜀)
+    /// Disable Hermes backend (skips summarize)
     #[arg(long, global = true)]
     pub no_hermes: bool,
 }
@@ -67,14 +68,14 @@ pub struct Cli {
 /// 세부 명령
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Codex: 세션 스캔 및 인덱싱 (FTS5 전문검색 인덱스 구축)
+    /// Codex: scan & index sessions (FTS5 full-text index)
     Scan {
         /// 분석 리포트 생성
         #[arg(long)]
         analyze: bool,
     },
 
-    /// Codex: 세션 압축 (--move 원본 삭제, --skip-scan 사전 스캔 생략)
+    /// Codex: compress sessions (--move deletes originals, --skip-scan skips pre-scan)
     Archive {
         /// 보존 일수 (이전 세션만 대상)
         #[arg(short = 'd', long, default_value = "30")]
@@ -84,16 +85,16 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// 압축 후 원본 .jsonl 삭제 (이동). scan 선행 필수 (--skip-scan과 충돌)
+        /// Delete original .jsonl after compress (move). Requires scan (conflicts with --skip-scan)
         #[arg(long = "move", conflicts_with = "skip_scan")]
         move_: bool,
 
-        /// archive 전 scan(인덱스 최신화) 건너뛰기
+        /// Skip pre-archive scan (index refresh)
         #[arg(long)]
         skip_scan: bool,
     },
 
-    /// Codex: 세션 복원 (DB의 archived 세션, --purge 보관본까지 삭제)
+    /// Codex: restore sessions (from DB archive index, --purge deletes .zst)
     Restore {
         /// 복원할 세션 ID
         #[arg(long)]
@@ -111,12 +112,12 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// 복원 후 보관본(.zst) 삭제 + archived 해제
+        /// Delete .zst after restore + clear archived flag
         #[arg(long)]
         purge: bool,
     },
 
-    /// Codex: 세션 목록
+    /// Codex: list sessions
     List {
         /// 대상 일수
         #[arg(short = 'd', long, default_value = "30")]
@@ -127,14 +128,14 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Codex: 통계
+    /// Codex: statistics
     Stats {
         /// 대상 일수
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
     },
 
-    /// Codex: 컴팩션 + 민감정보(.env/token/key) 탐지
+    /// Codex: compaction + sensitive-info (.env/token/key) scan
     Compact {
         /// 대상 일수
         #[arg(short = 'd', long, default_value = "0")]
@@ -149,7 +150,7 @@ pub enum Commands {
         scan_sensitive: bool,
     },
 
-    /// Hermes: 세션 요약 (요약 + FTS5 키워드 JSON)
+    /// Hermes: summarize sessions (summary + FTS5 keyword JSON)
     Summarize {
         /// 요약만 저장
         #[arg(long)]
@@ -160,7 +161,7 @@ pub enum Commands {
         fts_only: bool,
     },
 
-    /// Codex+Hermes: 관리·요약을 한 번에 실행
+    /// Codex+Hermes: run manage + summarize in one go
     Pipeline {
         /// Phase 1 건너뜀
         #[arg(long)]
@@ -221,9 +222,20 @@ pub fn run(cli: Cli) -> Result<()> {
             // DB 기반 대상 선정 (archived=0, 최근 days일)
             let sessions = db.list_active_by_days(days)?;
             if skip_scan && sessions.is_empty() && db.count_sessions()? == 0 {
-                eprintln!("경고: DB 인덱스가 비어 있습니다. scan을 먼저 실행하거나 --skip-scan을 제거하세요.");
+                eprintln!("{}", i18n::skip_scan_empty());
             }
             let filtered: Vec<&SessionInfo> = sessions.iter().collect();
+            let n = filtered.len();
+            if dry_run {
+                let mode = if move_ { i18n::mode_delete() } else { i18n::mode_keep() };
+                println!("{}", i18n::archive_start_dryrun(n, mode));
+            } else if n == 0 {
+                println!("{}", i18n::archive_start_none());
+            } else if move_ {
+                println!("{}", i18n::archive_start_move(n));
+            } else {
+                println!("{}", i18n::archive_start_keep(n));
+            }
             archiver.archive(&filtered, dry_run, move_, &db)?;
         }
 
@@ -242,6 +254,18 @@ pub fn run(cli: Cli) -> Result<()> {
             } else {
                 db.list_archived_by_days(days)?
             };
+
+            let n = rows.len();
+            if dry_run {
+                let mode = if purge { i18n::mode_delete() } else { i18n::mode_keep() };
+                println!("{}", i18n::restore_start_dryrun(n, mode));
+            } else if n == 0 {
+                println!("{}", i18n::restore_start_none());
+            } else if purge {
+                println!("{}", i18n::restore_start_purge(n));
+            } else {
+                println!("{}", i18n::restore_start_keep(n));
+            }
 
             archiver.restore(&rows, dry_run, purge, &db)?;
         }
@@ -401,7 +425,7 @@ fn backend_disabled(config: &Config, backend: Backend) -> bool {
             Backend::Hermes => "hermes",
             Backend::Both => "both",
         };
-        eprintln!("{} 백엔드 비활성 — 건너뜁니다 (--no-{} 또는 CODEX/HERMES_ENABLED 확인)", name, name);
+        eprintln!("{}", i18n::backend_disabled(name));
         true
     }
 }

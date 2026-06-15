@@ -14,6 +14,7 @@ pub mod compact;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod i18n;
 pub mod scanner;
 pub mod summary;
 pub mod tui;

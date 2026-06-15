@@ -37,6 +37,8 @@ pub struct Config {
     pub enabled_codex: bool,
     /// Hermes 백엔드 활성화
     pub enabled_hermes: bool,
+    /// UI 언어 ("ko" / "en")
+    pub language: String,
 }
 
 impl Default for Config {
@@ -59,6 +61,7 @@ impl Config {
             default_archive_days: 30,
             enabled_codex: true,
             enabled_hermes: true,
+            language: "ko".to_string(),
         }
     }
 
@@ -91,6 +94,9 @@ impl Config {
         if let Some(b) = parse_bool_env("HERMES_ENABLED") {
             self.enabled_hermes = b;
         }
+        if let Ok(lang) = std::env::var("LANGUAGE_CODE") {
+            self.language = lang;
+        }
     }
 
     /// 설정 로드 (default → config 파일 → 환경변수).
@@ -117,6 +123,11 @@ impl Config {
     /// 기본 config 파일 경로 (플랫폼 무관 ~/.config/session-butler/config.json)
     pub fn config_file_path() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".config").join("session-butler").join("config.json"))
+    }
+
+    /// config 파일이 이미 존재하는지 (첫 실행 감지용)
+    pub fn config_exists() -> bool {
+        Self::config_file_path().map(|p| p.exists()).unwrap_or(false)
     }
 
     /// 파일에서 설정 로드

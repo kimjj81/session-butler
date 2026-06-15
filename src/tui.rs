@@ -3,6 +3,7 @@
 use crate::cli::Commands;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::types::Backend;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -112,7 +113,7 @@ impl TuiApp {
             MenuItem {
                 id: "scan".to_string(),
                 title: "Scan".to_string(),
-                description: "Codex 세션 스캔 및 SQLite 인덱싱".to_string(),
+                description: i18n::tui_desc("scan").to_string(),
                 command: Commands::Scan { analyze: true },
                 args: vec![],
                 backend: Backend::Codex,
@@ -120,7 +121,7 @@ impl TuiApp {
             MenuItem {
                 id: "archive".to_string(),
                 title: "Archive".to_string(),
-                description: "zstd 압축 (--move 원본 삭제)".to_string(),
+                description: i18n::tui_desc("archive").to_string(),
                 command: Commands::Archive { days: 30, dry_run: false, move_: false, skip_scan: false },
                 args: vec![
                     Arg {
@@ -157,7 +158,7 @@ impl TuiApp {
             MenuItem {
                 id: "restore".to_string(),
                 title: "Restore".to_string(),
-                description: "압축 파일 복원 (--purge 보관본 삭제)".to_string(),
+                description: i18n::tui_desc("restore").to_string(),
                 command: Commands::Restore {
                     session_id: None,
                     all: false,
@@ -193,7 +194,7 @@ impl TuiApp {
             MenuItem {
                 id: "list".to_string(),
                 title: "List".to_string(),
-                description: "세션 목록 표시".to_string(),
+                description: i18n::tui_desc("list").to_string(),
                 command: Commands::List { days: 30, json: false },
                 args: vec![
                     Arg {
@@ -216,7 +217,7 @@ impl TuiApp {
             MenuItem {
                 id: "stats".to_string(),
                 title: "Stats".to_string(),
-                description: "세션 통계 표시".to_string(),
+                description: i18n::tui_desc("stats").to_string(),
                 command: Commands::Stats { days: 30 },
                 args: vec![
                     Arg {
@@ -232,7 +233,7 @@ impl TuiApp {
             MenuItem {
                 id: "compact".to_string(),
                 title: "Compact".to_string(),
-                description: "세션 compaction 및 민감정보 탐지".to_string(),
+                description: i18n::tui_desc("compact").to_string(),
                 command: Commands::Compact {
                     days: 0,
                     dry_run: false,
@@ -266,7 +267,7 @@ impl TuiApp {
             MenuItem {
                 id: "summarize".to_string(),
                 title: "Summarize".to_string(),
-                description: "Hermes 세션 요약 및 FTS5 인덱스".to_string(),
+                description: i18n::tui_desc("summarize").to_string(),
                 command: Commands::Summarize {
                     summary_only: false,
                     fts_only: false,
@@ -292,7 +293,7 @@ impl TuiApp {
             MenuItem {
                 id: "pipeline".to_string(),
                 title: "Pipeline".to_string(),
-                description: "전체 파이프라인 실행".to_string(),
+                description: i18n::tui_desc("pipeline").to_string(),
                 command: Commands::Pipeline {
                     skip_scan: false,
                     skip_archive: false,

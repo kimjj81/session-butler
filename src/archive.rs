@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::types::{ArchivedSession, ArchivedSessionRow, SessionInfo};
 use chrono::Datelike;
 use std::fs::{self, File};
@@ -243,15 +244,15 @@ impl SessionArchiver {
             0.0
         };
 
-        println!("Archived {} sessions ({:.1}GB -> {:.1}GB, {:.0}% reduction)",
+        println!("{}", i18n::archive_summary(
             archived.len(),
             total_original as f64 / (1024.0 * 1024.0 * 1024.0),
             total_compressed as f64 / (1024.0 * 1024.0 * 1024.0),
             ratio
-        );
+        ));
 
         if !skipped.is_empty() {
-            println!("Skipped: {} sessions", skipped.len());
+            println!("{}", i18n::archive_skipped(skipped.len()));
         }
 
         Ok(ArchiveResult {
@@ -455,7 +456,7 @@ impl SessionArchiver {
             }
         }
 
-        println!("Restored {} sessions", restored.len());
+        println!("{}", i18n::restore_summary(restored.len()));
         Ok(restored)
     }
 

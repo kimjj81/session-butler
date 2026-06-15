@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::types::CodexSessionMeta;
 use crate::util;
 use std::fs::File;
@@ -57,7 +58,7 @@ impl CodexScanner {
 
         let total_files = files.len();
         if self.progress {
-            println!("Found {} JSONL files", total_files);
+            println!("{}", i18n::scan_found(total_files));
         }
 
         // 추출
@@ -68,7 +69,7 @@ impl CodexScanner {
                 Ok(meta) => {
                     results.push(meta);
                     if self.progress && human_idx % 500 == 0 {
-                        println!("  scanned {}/{}...", human_idx, total_files);
+                        println!("{}", i18n::scan_scanning(human_idx, total_files));
                     }
                 }
                 Err(e) => {
@@ -78,7 +79,7 @@ impl CodexScanner {
         }
 
         if self.progress {
-            println!("Extracted metadata for {} sessions", results.len());
+            println!("{}", i18n::scan_scanned(results.len()));
         }
 
         Ok(results)
@@ -277,7 +278,7 @@ impl CodexScanner {
         drop(db);
 
         if self.progress {
-            println!("Indexed {} sessions to {}", metas.len(), self.config.codex_index_db.display());
+            println!("{}", i18n::scan_indexed(metas.len(), &self.config.codex_index_db.display().to_string()));
         }
 
         Ok(())

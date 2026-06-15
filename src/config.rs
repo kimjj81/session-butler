@@ -150,13 +150,24 @@ impl Config {
         Ok(config)
     }
 
-    /// 설정을 파일에 저장
+    /// 설정을 파일에 저장 (부모 디렉토리 자동 생성).
+    /// 최초 실행 시 ~/.config/session-butler/ 가 없어도 저장되도록 한다.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = path.as_ref();
+
+        // 부모 디렉토리가 없으면 생성 (빈 경로/루트 제외)
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("설정 디렉토리 생성 실패: {}", parent.display()))?;
+            }
+        }
+
         let content = serde_json::to_string_pretty(self)
             .context("설정 직렬화 실패")?;
 
-        std::fs::write(path.as_ref(), content)
-            .with_context(|| format!("설정 저장 실패: {}", path.as_ref().display()))?;
+        std::fs::write(path, content)
+            .with_context(|| format!("설정 저장 실패: {}", path.display()))?;
 
         Ok(())
     }
@@ -212,5 +223,22 @@ mod tests {
         let path = expand_path("~/test");
         // 홈 디렉토리로 시작해야 함
         assert!(path.to_string_lossy().contains("/"));
+    }
+
+    #[test]
+    fn test_save_creates_parent_dirs() {
+        let dir = std::env::temp_dir().join("session_butler_test_save");
+        let _ = std::fs::remove_dir_all(&dir); // 잔재 정리
+        let nested = dir.join("nested/deep/config.json");
+
+        let config = Config::default();
+        config.save(&nested).expect("save should create parent dirs");
+
+        assert!(nested.exists(), "config 파일이 생성되어야 함");
+        let loaded = Config::from_file(&nested).expect("저장된 config 재로드 가능");
+        assert_eq!(loaded.default_archive_days, config.default_archive_days);
+        assert_eq!(loaded.language, config.language);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

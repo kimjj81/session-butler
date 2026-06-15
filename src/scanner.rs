@@ -110,6 +110,8 @@ impl CodexScanner {
 
         let (date, session_id) = self.parse_filename(filename)?;
 
+        let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
         let file = File::open(path)
             .map_err(|e| Error::Io(e))?;
         let reader = BufReader::new(file);
@@ -134,6 +136,7 @@ impl CodexScanner {
             line_count: 0,
             corrupt_lines: 0,
             has_user_event: false,
+            size_bytes,
             indexed_at: None,
         };
 
@@ -328,7 +331,6 @@ impl CodexScanner {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use std::fs::create_dir_all;
 
     #[test]
     fn test_parse_filename() {

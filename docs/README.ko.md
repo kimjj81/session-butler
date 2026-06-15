@@ -4,6 +4,10 @@
 
 **Codex** / **Hermes** 세션 기록을 압축·보관하고, 검색 가능한 지식베이스로 만들어주는 도구.
 
+- **Codex** 세션 → 스캔/인덱싱, 압축/보관(+복원), 컴팩션 및 민감정보 탐지.
+- **Hermes** 세션 → 요약 + 키워드 검색 레이어 생성.
+- 사용하는 백엔드만 선택해 활성화(Codex만 / Hermes만 / 둘 다).
+
 ---
 
 ## 왜 만들었는가
@@ -14,25 +18,29 @@
 
 **Session Butler는 이 딜레마를 푼다.** 오래된 세션의 용량을 줄이는 동시에, 검색하고 다시 꺼내 쓸 수 있는 개인 지식베이스로 바꿔서 폴더 속에서 썩히지 않게 만든다.
 
-## 목표
+## 어떤 일을 하나
 
-하나의 안전한 파이프라인으로:
+이 도구는 **Codex** 세션 로그를 관리하고, **Hermes** 세션 로그를 요약합니다. 각 명령은 한쪽 백엔드를 대상으로 하며, 설정에서 백엔드별 활성화를 제어합니다(아래 설정 참고).
 
-1. **인덱싱** — 모든 세션을 전문검색(FTS5) 지원 SQLite에 색인.
-2. **압축** — 오래된 세션을 zstd로 압축. 원본은 자동 삭제하지 않음.
-3. **컴팩션** — 세션을 정리하고 민감정보(API key, token 등)를 탐지.
-4. **요약** — 세션을 검색 가능한 요약 + 키워드 레이어로 변환.
+### Codex — 세션 로그 관리
 
-…그래서 몇 달 치 AI 작업 기록이 디스크에서는 작게, 손 안에서는 쓸모 있게 남도록.
+| 명령 | 하는 일 |
+|------|---------|
+| `scan` | Codex `rollout-*.jsonl`을 순회하며 메타데이터 + FTS5 전문검색 인덱스를 SQLite에 저장 |
+| `archive` | N일 이상 지난 세션을 zstd 압축. `--move`는 압축 후 원본 삭제, `--skip-scan`은 사전 스캔 생략 |
+| `restore` | `.zst`에서 복원 — **DB 아카이브 인덱스**를 읽습니다(원본이 없어도 동작). `--purge`는 복원 후 `.zst` 삭제 |
+| `list` / `stats` | 보관/활성 세션 목록 및 통계 |
+| `compact` | 안전한 컴팩션 + 민감정보 탐지(`.env`, token, key) |
 
-## 동작 방식 — 4단계 파이프라인
+아카이브 상태와 SHA-256 체크섬은 **SQLite 인덱스**에 저장되어, `restore`가 무결성을 검증하고 원본 삭제 후에도 세션을 찾을 수 있습니다.
 
-| 단계 | 명령 | 하는 일 |
-|------|------|---------|
-| 1 · Scan | `scan` | Codex `rollout-*.jsonl`을 순회하며 메타데이터 + FTS5 인덱스를 SQLite에 저장 |
-| 2 · Archive | `archive` / `restore` / `list` / `stats` | N일 이상 지난 세션을 zstd 압축, SHA-256 체크섬 기록 |
-| 3 · Compact | `compact` | 안전한 컴팩션 + 민감정보 탐지(`.env`, token, key) |
-| 4 · Summarize | `summarize` | Hermes 세션 분석 → 요약 + FTS5 키워드 JSON 생성 |
+### Hermes — 세션 로그 요약
+
+| 명령 | 하는 일 |
+|------|---------|
+| `summarize` | Hermes `session_*.json` 분석 → 요약 + FTS5 키워드 JSON |
+
+참고: Hermes는 여러 종류의 파일(`session_*.json`, `request_dump_*.json` 등)을 기록합니다. 실제 대화 로그인 `session_*.json`만 요약하며, 요청/에러 덤프는 건너뜁니다.
 
 ## 빌드
 
@@ -58,49 +66,67 @@ session-butler          # 인자 없음 → TUI 실행
 session-butler --tui    # 명시적 실행
 ```
 
-TUI는 4단계 전체(Scan, Archive, Restore, List, Stats, Compact, Summarize, Pipeline)를 하나의 메뉴로 묶고 인자를 직접 편집할 수 있어서, 일회성 실행에 편하다.
+TUI는 상단에 **status 바**로 활성 백엔드, 세션 경로, 보존 일수를 항상 표시하며, 활성화된 백엔드의 명령만 목록에 보여줍니다.
 
 ### CLI
 
 ```bash
-# Phase 1 — Codex 세션 스캔 + 인덱싱
+# Codex — 스캔 + 인덱싱
 session-butler scan [--analyze]
 
-# Phase 2 — 압축
-session-butler archive --days 30 --dry-run   # 미리보기
-session-butler archive --days 30             # 압축 (원본 보존)
-session-butler restore --all                 # 전체 복원
+# Codex — 압축 / 복원
+session-butler archive  --days 30 --dry-run    # 미리보기
+session-butler archive  --days 30              # 압축 (원본 보존)
+session-butler archive  --days 30 --move       # 압축 후 원본 삭제
+session-butler restore  --all                  # 복원 (.zst 유지, 재복원 가능)
+session-butler restore  --all --purge          # 복원 후 .zst 삭제
+
+# Codex — 목록 / 통계 / 컴팩션
 session-butler list   --days 30 [--json]
 session-butler stats  --days 30
+session-butler compact --scan-sensitive        # 민감정보 스캔만
 
-# Phase 3 — 컴팩션
-session-butler compact --scan-sensitive      # 민감정보 스캔만
-session-butler compact --days 0 --dry-run    # 컴팩션 미리보기
-
-# Phase 4 — Hermes 세션 요약
-session-butler summarize                     # 요약 + FTS5 JSON
+# Hermes — 요약
+session-butler summarize                       # 요약 + FTS5 JSON
 session-butler summarize --summary-only
 session-butler summarize --fts-only
 
-# 전체 파이프라인 순차 실행
+# 한 번에 순차 실행
 session-butler pipeline --days 30 --dry-run
 ```
 
-### 공용 옵션 (모든 명령)
+## 설정
 
-| 플래그 | 기본값 |
-|------|---------|
-| `-C, --codex-sessions <DIR>` | `~/.codex/sessions` |
-| `-H, --hermes-sessions <DIR>` | `~/.hermes/sessions` |
-| `-A, --codex-archive <DIR>` | `~/.codex/archive` |
-| `-I, --codex-index-db <PATH>` | `./codex_index.sqlite` |
-| `-S, --summary-layer <PATH>` | `./summary_layer.json` |
-| `-F, --fts5-index <PATH>` | `./fts5_index.json` |
-| `-v, --verbose` | 상세 출력 |
+### 백엔드 활성화
 
-### 환경변수
+Codex와 Hermes 각각 활성화/비활성화할 수 있습니다. 우선순위(높은 것이 이김):
 
-`CODEX_SESSIONS`, `CODEX_ARCHIVE`, `HERMES_SESSIONS`, `CODEX_STATE_DB`, `CODEX_INDEX_DB`, `SUMMARY_LAYER_JSON`, `FTS5_INDEX_JSON` — 위 플래그와 동일한 의미/기본값.
+1. CLI 플래그: `--no-codex`, `--no-hermes`
+2. 환경변수: `CODEX_ENABLED`, `HERMES_ENABLED`(`0`/`false`/`off`/`no` → 비활성)
+3. 설정 파일: `~/.config/session-butler/config.json`
+4. 기본값: 둘 다 활성
+
+비활성 백엔드의 명령은 no-op가 되며, `pipeline`은 해당 백엔드 작업을 자동으로 건너뜁니다.
+
+설정 파일 예시:
+
+```json
+{
+  "enabled_codex": true,
+  "enabled_hermes": false
+}
+```
+
+### 경로 및 출력 (공용 옵션 또는 환경변수)
+
+| 플래그 | 환경변수 | 기본값 |
+|------|---------|---------|
+| `-C, --codex-sessions <DIR>` | `CODEX_SESSIONS` | `~/.codex/sessions` |
+| `-H, --hermes-sessions <DIR>` | `HERMES_SESSIONS` | `~/.hermes/sessions` |
+| `-A, --codex-archive <DIR>` | `CODEX_ARCHIVE` | `~/.codex/archive` |
+| `-I, --codex-index-db <PATH>` | `CODEX_INDEX_DB` | `./codex_index.sqlite` |
+| `-S, --summary-layer <PATH>` | `SUMMARY_LAYER_JSON` | `./summary_layer.json` |
+| `-F, --fts5-index <PATH>` | `FTS5_INDEX_JSON` | `./fts5_index.json` |
 
 ## 결과
 
@@ -109,19 +135,20 @@ session-butler pipeline --days 30 --dry-run
 | 대상 | 파일 수 | 원본 크기 | 결과 |
 |------|--------:|---------:|-------|
 | Codex 세션 | 3,037 | 3.1 GB | 압축 대상(2,303개) **2.42 GB → 0.86 GB** (약 64% 축소) |
-| Hermes 세션 | 82 | 47 MB | 요약 → `summary_layer.json` + `fts5_index.json` |
+| Hermes 세션 | 82 (그중 `session_*.json` 52개) | 47 MB | 52개 세션 요약 → `summary_layer.json` + `fts5_index.json` |
 
-즉, **2.4 GB짜리 과거 Codex 세션이 약 860 MB로 줄었고**, SQLite + FTS5 인덱스로 전문검색도 그대로 가능하다. 압축 후 원본을 지우면 그만큼 디스크를 추가로 확보할 수 있다.
+즉, **2.4 GB짜리 과거 Codex 세션이 약 860 MB로 줄었고**, SQLite + FTS5 인덱스로 전문검색도 그대로 가능하다. `archive --move`로 원본을 지우면 그만큼 디스크를 추가로 확보할 수 있다.
 
 ## 안전성
 
-- 어떤 단계에서도 원본 세션 파일을 **자동 삭제하지 않는다**. 압축은 `.jsonl.zst` 사본을 만들 뿐이며, 원본은 명시적으로 restore/quarantine할 때만 옮겨진다.
+- 기본적으로 어떤 명령도 원본을 삭제하지 않습니다. 압축은 `.jsonl.zst` 사본을 만들 뿐, 원본은 그대로 둡니다.
+- 명시적 삭제만 가능: `archive --move`(압축 후 원본 삭제), `restore --purge`(복원 후 `.zst` 삭제).
 - 보존 기간(`--days`, 기본 `30`)보다 최근 세션은 대상에서 제외된다.
-- 압축 파일마다 SHA-256 체크섬을 `checksums.jsonl`에 기록하므로 `restore` 시 무결성을 검증할 수 있다.
+- 압축 파일마다 SHA-256 체크섬을 SQLite 인덱스에 저장하므로, `restore`가 무결성을 검증하고 손상을 감지합니다.
 
 ## 개발 현황
 
-원래 Python 프로토타입을 Rust로 포팅. 4단계 파이프라인, TUI, CLI 모두 동작한다. Phase 1·4 출력은 Python 원본과 일치함을 검증했고, Phase 2는 충실하게 따른다.
+스캔/인덱싱, 압축/복원(SQLite 기반), 컴팩션, 요약, TUI, CLI 모두 동작한다.
 
 ## 라이선스
 

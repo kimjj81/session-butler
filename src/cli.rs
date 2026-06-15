@@ -1,11 +1,13 @@
 //! CLI 인터페이스
 
-use crate::archive::{SessionArchiver, SessionInfo};
+use crate::archive::SessionArchiver;
 use crate::compact::SessionCompactor;
 use crate::config::Config;
+use crate::db::SessionDb;
 use crate::error::Result;
 use crate::scanner::CodexScanner;
 use crate::summary::SummaryBuilder;
+use crate::types::SessionInfo;
 use clap::{Parser, Subcommand};
 
 /// Session Butler - Codex/Hermes 세션 파일 관리 도구
@@ -13,7 +15,13 @@ use clap::{Parser, Subcommand};
 #[command(name = "session-butler")]
 #[command(author = "Kim Jeongjin")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Codex/Hermes 세션 파일 관리 도구 (4단계 파이프라인)", long_about = None)]
+#[command(
+    about = "Codex/Hermes 세션 기록을 압축·보관·요약하는 도구",
+    long_about = "Codex 세션(rollout-*.jsonl)은 스캔·압축·복원·컴팩션으로 관리하고, \
+Hermes 세션(session_*.json)은 요약·키워드화해 검색 가능한 지식베이스로 만듭니다.\n\
+백엔드 활성화 우선순위: config 파일 → 환경변수(CODEX_ENABLED/HERMES_ENABLED) → \
+--no-codex/--no-hermes"
+)]
 pub struct Cli {
     /// 명령
     #[command(subcommand)]
@@ -46,19 +54,27 @@ pub struct Cli {
     /// 상세 출력
     #[arg(short = 'v', long, global = true)]
     pub verbose: bool,
+
+    /// Codex 백엔드 비활성 (scan/archive/restore/list/stats/compact 건너뜀)
+    #[arg(long, global = true)]
+    pub no_codex: bool,
+
+    /// Hermes 백엔드 비활성 (summarize 건너뜀)
+    #[arg(long, global = true)]
+    pub no_hermes: bool,
 }
 
 /// 세부 명령
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Phase 1: Codex 세션 스캔 및 인덱싱
+    /// Codex: 세션 스캔 및 인덱싱 (FTS5 전문검색 인덱스 구축)
     Scan {
         /// 분석 리포트 생성
         #[arg(long)]
         analyze: bool,
     },
 
-    /// Phase 2: 세션 압축 (archive)
+    /// Codex: 세션 압축 (--move 원본 삭제, --skip-scan 사전 스캔 생략)
     Archive {
         /// 보존 일수 (이전 세션만 대상)
         #[arg(short = 'd', long, default_value = "30")]
@@ -67,9 +83,17 @@ pub enum Commands {
         /// Dry-run (실제 실행 안 함)
         #[arg(long)]
         dry_run: bool,
+
+        /// 압축 후 원본 .jsonl 삭제 (이동)
+        #[arg(long = "move")]
+        move_: bool,
+
+        /// archive 전 scan(인덱스 최신화) 건너뛰기
+        #[arg(long)]
+        skip_scan: bool,
     },
 
-    /// Phase 2: 세션 복원 (restore)
+    /// Codex: 세션 복원 (DB의 archived 세션, --purge 보관본까지 삭제)
     Restore {
         /// 복원할 세션 ID
         #[arg(long)]
@@ -86,9 +110,13 @@ pub enum Commands {
         /// Dry-run
         #[arg(long)]
         dry_run: bool,
+
+        /// 복원 후 보관본(.zst) 삭제 + archived 해제
+        #[arg(long)]
+        purge: bool,
     },
 
-    /// Phase 2: 세션 목록
+    /// Codex: 세션 목록
     List {
         /// 대상 일수
         #[arg(short = 'd', long, default_value = "30")]
@@ -99,14 +127,14 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Phase 2: 통계
+    /// Codex: 통계
     Stats {
         /// 대상 일수
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
     },
 
-    /// Phase 3: Compaction
+    /// Codex: 컴팩션 + 민감정보(.env/token/key) 탐지
     Compact {
         /// 대상 일수
         #[arg(short = 'd', long, default_value = "0")]
@@ -121,7 +149,7 @@ pub enum Commands {
         scan_sensitive: bool,
     },
 
-    /// Phase 4: Hermes 세션 요약
+    /// Hermes: 세션 요약 (요약 + FTS5 키워드 JSON)
     Summarize {
         /// 요약만 저장
         #[arg(long)]
@@ -132,7 +160,7 @@ pub enum Commands {
         fts_only: bool,
     },
 
-    /// 전체 파이프라인 실행
+    /// Codex+Hermes: 관리·요약을 한 번에 실행
     Pipeline {
         /// Phase 1 건너뜀
         #[arg(long)]
@@ -166,6 +194,9 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Scan { analyze } => {
+            if backend_disabled(&config, "codex") {
+                return Ok(());
+            }
             let scanner = CodexScanner::new(config);
             let metas = scanner.scan_all()?;
             scanner.index_sessions(metas)?;
@@ -175,31 +206,47 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Archive { days, dry_run } => {
+        Commands::Archive { days, dry_run, move_, skip_scan } => {
+            if backend_disabled(&config, "codex") {
+                return Ok(());
+            }
+            // 항상 scan 선행하여 인덱스 최신화 (--skip-scan으로 건너뛰기)
+            if !skip_scan {
+                let scanner = CodexScanner::new(config.clone());
+                let metas = scanner.scan_all()?;
+                scanner.index_sessions(metas)?;
+            }
+            let db = SessionDb::new(&config.codex_index_db)?;
             let archiver = SessionArchiver::new(config);
-            let sessions = archiver.discover_sessions()?;
-            let filtered = archiver.filter_by_days(&sessions, days);
-            archiver.archive(&filtered, dry_run)?;
+            // DB 기반 대상 선정 (archived=0, 최근 days일)
+            let sessions = db.list_active_by_days(days)?;
+            let filtered: Vec<&SessionInfo> = sessions.iter().collect();
+            archiver.archive(&filtered, dry_run, move_, &db)?;
         }
 
-        Commands::Restore { session_id, all, days, dry_run } => {
+        Commands::Restore { session_id, all, days, dry_run, purge } => {
+            if backend_disabled(&config, "codex") {
+                return Ok(());
+            }
+            let db = SessionDb::new(&config.codex_index_db)?;
             let archiver = SessionArchiver::new(config);
-            let sessions = archiver.discover_sessions()?;
 
-            let filtered: Vec<&SessionInfo> = if let Some(ref id) = session_id {
-                sessions.iter()
-                    .filter(|s| s.session_id.as_deref() == Some(id))
-                    .collect()
+            // restore 대상은 DB의 archived 세션 (원본 디렉토리 스캔 의존 제거)
+            let rows = if let Some(ref id) = session_id {
+                db.list_archived_by_ids(&[id.clone()])?
             } else if all {
-                sessions.iter().collect()
+                db.list_archived()?
             } else {
-                archiver.filter_by_days(&sessions, days)
+                db.list_archived_by_days(days)?
             };
 
-            archiver.restore(&filtered, dry_run)?;
+            archiver.restore(&rows, dry_run, purge, &db)?;
         }
 
         Commands::List { days, json } => {
+            if backend_disabled(&config, "codex") {
+                return Ok(());
+            }
             let archiver = SessionArchiver::new(config);
             let sessions = archiver.discover_sessions()?;
             let filtered_refs = archiver.filter_by_days(&sessions, days);
@@ -208,6 +255,9 @@ pub fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Stats { days } => {
+            if backend_disabled(&config, "codex") {
+                return Ok(());
+            }
             let archiver = SessionArchiver::new(config);
             let sessions = archiver.discover_sessions()?;
             let filtered_refs = archiver.filter_by_days(&sessions, days);
@@ -216,6 +266,9 @@ pub fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Compact { days, dry_run, scan_sensitive } => {
+            if backend_disabled(&config, "codex") {
+                return Ok(());
+            }
             let compactor = SessionCompactor::new(config)?;
 
             if scan_sensitive {
@@ -234,6 +287,9 @@ pub fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Summarize { summary_only, fts_only } => {
+            if backend_disabled(&config, "hermes") {
+                return Ok(());
+            }
             let builder = SummaryBuilder::new(config)?;
 
             if summary_only {
@@ -255,35 +311,42 @@ pub fn run(cli: Cli) -> Result<()> {
             days,
             dry_run,
         } => {
+            // 비활성 백엔드는 해당 단계를 자동으로 건너뜀
+            let skip_scan = skip_scan || !config.enabled_codex;
+            let skip_archive = skip_archive || !config.enabled_codex;
+            let skip_compact = skip_compact || !config.enabled_codex;
+            let skip_summarize = skip_summarize || !config.enabled_hermes;
+
             if !skip_scan {
-                println!("Phase 1: Scanning Codex sessions...");
+                println!("Scanning Codex sessions...");
                 let scanner = CodexScanner::new(config.clone());
                 let metas = scanner.scan_all()?;
                 scanner.index_sessions(metas)?;
-                println!("Phase 1 complete.\n");
+                println!("Scan complete.\n");
             }
 
             if !skip_archive && !dry_run {
-                println!("Phase 2: Archiving sessions...");
+                println!("Archiving sessions...");
+                let db = SessionDb::new(&config.codex_index_db)?;
                 let archiver = SessionArchiver::new(config.clone());
-                let sessions = archiver.discover_sessions()?;
-                let filtered = archiver.filter_by_days(&sessions, days);
-                archiver.archive(&filtered, dry_run)?;
-                println!("Phase 2 complete.\n");
+                let sessions = db.list_active_by_days(days)?;
+                let filtered: Vec<&SessionInfo> = sessions.iter().collect();
+                archiver.archive(&filtered, dry_run, false, &db)?;
+                println!("Archive complete.\n");
             }
 
             if !skip_compact {
-                println!("Phase 3: Compacting sessions...");
+                println!("Compacting sessions...");
                 let compactor = SessionCompactor::new(config.clone())?;
                 compactor.compact_sessions(days, dry_run)?;
-                println!("Phase 3 complete.\n");
+                println!("Compact complete.\n");
             }
 
             if !skip_summarize {
-                println!("Phase 4: Summarizing Hermes sessions...");
+                println!("Summarizing Hermes sessions...");
                 let builder = SummaryBuilder::new(config)?;
                 builder.run_pipeline()?;
-                println!("Phase 4 complete.\n");
+                println!("Summarize complete.\n");
             }
 
             println!("Pipeline complete!");
@@ -293,9 +356,9 @@ pub fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// CLI에서 설정 빌드
+/// CLI에서 설정 빌드 (파일 → 환경변수 → CLI 플래그 우선순위)
 fn build_config(cli: &Cli) -> Config {
-    let mut config = Config::from_env();
+    let mut config = Config::load();
 
     if let Some(ref path) = cli.codex_sessions {
         config.codex_sessions = expand_path(path);
@@ -316,7 +379,28 @@ fn build_config(cli: &Cli) -> Config {
         config.fts5_index = PathBuf::from(path);
     }
 
+    // CLI 백엔드 플래그 최종 적용
+    if cli.no_codex {
+        config.enabled_codex = false;
+    }
+    if cli.no_hermes {
+        config.enabled_hermes = false;
+    }
+
     config
+}
+
+/// 백엔드가 비활성이면 경고하고 true 반환 (no-op 처리용)
+fn backend_disabled(config: &Config, backend: &str) -> bool {
+    let disabled = match backend {
+        "codex" => !config.enabled_codex,
+        "hermes" => !config.enabled_hermes,
+        _ => false,
+    };
+    if disabled {
+        eprintln!("{} 백엔드 비활성 — 건너뜁니다 (--no-{} 또는 CODEX/HERMES_ENABLED 확인)", backend, backend);
+    }
+    disabled
 }
 
 /// 경로 확장 (~를 홈 디렉토리로)

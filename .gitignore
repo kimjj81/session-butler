@@ -1,5 +1,12 @@
 *.sqlite
+
+# Python (prototype removed; keep ignores for safety)
 __pycache__/
+.venv/
+
+# Generated outputs
+/summary_layer.json
+/fts5_index.json
 
 # Rust build artifacts
 /target/

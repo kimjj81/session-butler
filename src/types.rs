@@ -1,6 +1,6 @@
 //! Session Butler 공통 타입 정의
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +27,7 @@ pub struct CodexSessionMeta {
     pub line_count: usize,
     pub corrupt_lines: usize,
     pub has_user_event: bool,
+    pub size_bytes: u64,
     pub indexed_at: Option<DateTime<Utc>>,
 }
 
@@ -87,6 +88,29 @@ pub struct ArchivedSession {
     pub date: Option<String>,
     pub size_bytes: u64,
     pub compressed_size_bytes: u64,
+}
+
+/// DB에서 읽어온 archived 세션 (restore 대상)
+#[derive(Debug, Clone)]
+pub struct ArchivedSessionRow {
+    pub session_id: String,
+    /// 원본 jsonl 경로 = 복원 대상
+    pub path: PathBuf,
+    pub date: Option<String>,
+    /// .zst 압축본 절대경로
+    pub compressed_path: PathBuf,
+    pub checksum_sha256: String,
+}
+
+/// 세션 정보 (archive 대상/표시용 최소 정보)
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionInfo {
+    pub path: PathBuf,
+    pub date: Option<NaiveDate>,
+    pub size_bytes: u64,
+    pub session_id: Option<String>,
+    pub model_provider: Option<String>,
+    pub cli_version: Option<String>,
 }
 
 /// Hermes 세션 레코드

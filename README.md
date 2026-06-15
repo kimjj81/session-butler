@@ -4,35 +4,43 @@
 
 Compress, archive, and turn your **Codex** / **Hermes** session logs into a searchable knowledge base.
 
+- **Codex** sessions → scan/index, compress/archive (+ restore), compact & secret-screen.
+- **Hermes** sessions → summarize into a queryable summary + keyword layer.
+- Enable only the backend you use (Codex, Hermes, or both).
+
 ---
 
 ## Why I built this
 
 Tools like **Codex** and **Hermes** silently record every conversation as JSONL/JSON under your home directory. Use them daily for a few months and those files pile up — my own `~/.codex/sessions/` had grown past **3 GB**.
 
-That history is genuinely valuable: months of debugging notes, design decisions, and hard-won prompts. But at 3 GB it was too bulky to leave sitting on disk, too painful to scroll through raw, and too precious to delete. It was dead weight — taking up space yet doing nothing for me.
+That history is genuinely valuable: months of debugging notes, design decisions, and hard-won prompts. But at 3 GB it was too bulky to leave on disk, too painful to scroll through raw, and too precious to delete. It was dead weight — taking up space yet doing nothing for me.
 
 **Session Butler resolves that tension.** It shrinks the storage footprint of old sessions *while* making them searchable and reusable as a personal knowledge base, instead of letting them rot in a folder.
 
-## Goal
+## What it does
 
-One safe pipeline that:
+The tool manages **Codex** session logs and summarizes **Hermes** session logs. Each command targets one backend; enable/disable backends via settings (see below).
 
-1. **Indexes** every session into SQLite with full-text search.
-2. **Compresses** old sessions with zstd — originals are never auto-deleted.
-3. **Compacts** sessions and screens them for secrets (API keys, tokens).
-4. **Summarizes** sessions into a queryable summary + keyword layer.
+### Codex — manage session logs
 
-…so months of AI-assisted work stays small on disk and actually useful in your hands.
+| Command | What it does |
+|---------|--------------|
+| `scan` | Walk Codex `rollout-*.jsonl`, write metadata + FTS5 full-text index to SQLite |
+| `archive` | zstd-compress sessions older than N days. `--move` deletes originals after; `--skip-scan` skips the pre-archive scan |
+| `restore` | Restore from `.zst` — reads the **DB archive index** (works even if originals are gone). `--purge` deletes the `.zst` afterward |
+| `list` / `stats` | List / summarize archived + active sessions |
+| `compact` | Safe compaction + sensitive-info detection (`.env`, tokens, keys) |
 
-## How it works — the 4-phase pipeline
+Archive state and SHA-256 checksums are stored in the **SQLite index**, so `restore` can verify integrity and find sessions even after originals are removed.
 
-| Phase | Command | What it does |
-|-------|---------|--------------|
-| 1 · Scan | `scan` | Walk Codex `rollout-*.jsonl`, write metadata + FTS5 index to SQLite |
-| 2 · Archive | `archive` / `restore` / `list` / `stats` | zstd-compress sessions older than N days, with SHA-256 checksums |
-| 3 · Compact | `compact` | Safe compaction + sensitive-info detection (`.env`, tokens, keys) |
-| 4 · Summarize | `summarize` | Analyze Hermes sessions → summary + FTS5 keyword JSON |
+### Hermes — summarize session logs
+
+| Command | What it does |
+|---------|--------------|
+| `summarize` | Analyze Hermes `session_*.json` → summary + FTS5 keyword JSON |
+
+Note: Hermes writes several file types (`session_*.json`, `request_dump_*.json`, …). Only `session_*.json` (the actual conversation logs) are summarized; request/error dumps are skipped.
 
 ## Build
 
@@ -58,70 +66,89 @@ session-butler          # no args → launches the TUI
 session-butler --tui    # explicit
 ```
 
-The TUI is a single menu over all four phases (Scan, Archive, Restore, List, Stats, Compact, Summarize, Pipeline) with editable arguments — handy for one-off runs.
+The TUI shows a **status bar** with the active backends, session paths, and retention days at all times, and lists only the commands for enabled backends.
 
 ### CLI
 
 ```bash
-# Phase 1 — scan + index Codex sessions
+# Codex — scan + index
 session-butler scan [--analyze]
 
-# Phase 2 — archive
-session-butler archive --days 30 --dry-run   # preview
-session-butler archive --days 30             # compress (originals kept)
-session-butler restore --all                 # restore everything
+# Codex — archive / restore
+session-butler archive  --days 30 --dry-run    # preview
+session-butler archive  --days 30              # compress (originals kept)
+session-butler archive  --days 30 --move       # compress then delete originals
+session-butler restore  --all                  # restore (keeps .zst for re-restore)
+session-butler restore  --all --purge          # restore then delete .zst
+
+# Codex — list / stats / compact
 session-butler list   --days 30 [--json]
 session-butler stats  --days 30
+session-butler compact --scan-sensitive        # scan for secrets only
 
-# Phase 3 — compaction
-session-butler compact --scan-sensitive      # scan for secrets only
-session-butler compact --days 0 --dry-run    # preview compaction
-
-# Phase 4 — summarize Hermes sessions
-session-butler summarize                     # summary + FTS5 JSON
+# Hermes — summarize
+session-butler summarize                       # summary + FTS5 JSON
 session-butler summarize --summary-only
 session-butler summarize --fts-only
 
-# Run everything, in order
+# Everything, in order
 session-butler pipeline --days 30 --dry-run
 ```
 
-### Global options (any command)
+## Settings
 
-| Flag | Default |
-|------|---------|
-| `-C, --codex-sessions <DIR>` | `~/.codex/sessions` |
-| `-H, --hermes-sessions <DIR>` | `~/.hermes/sessions` |
-| `-A, --codex-archive <DIR>` | `~/.codex/archive` |
-| `-I, --codex-index-db <PATH>` | `./codex_index.sqlite` |
-| `-S, --summary-layer <PATH>` | `./summary_layer.json` |
-| `-F, --fts5-index <PATH>` | `./fts5_index.json` |
-| `-v, --verbose` | verbose output |
+### Backend enable/disable
 
-### Environment variables
+Codex and Hermes can each be enabled or disabled. Precedence (highest wins):
 
-`CODEX_SESSIONS`, `CODEX_ARCHIVE`, `HERMES_SESSIONS`, `CODEX_STATE_DB`, `CODEX_INDEX_DB`, `SUMMARY_LAYER_JSON`, `FTS5_INDEX_JSON` — same meaning/defaults as the flags above.
+1. CLI flags: `--no-codex`, `--no-hermes`
+2. Environment variables: `CODEX_ENABLED`, `HERMES_ENABLED` (`0`/`false`/`off`/`no` → disabled)
+3. Config file: `~/.config/session-butler/config.json`
+4. Default: both enabled
+
+A disabled backend's commands become no-ops, and `pipeline` skips that backend's work automatically.
+
+Example config file:
+
+```json
+{
+  "enabled_codex": true,
+  "enabled_hermes": false
+}
+```
+
+### Paths & outputs (global options or env vars)
+
+| Flag | Env var | Default |
+|------|---------|---------|
+| `-C, --codex-sessions <DIR>` | `CODEX_SESSIONS` | `~/.codex/sessions` |
+| `-H, --hermes-sessions <DIR>` | `HERMES_SESSIONS` | `~/.hermes/sessions` |
+| `-A, --codex-archive <DIR>` | `CODEX_ARCHIVE` | `~/.codex/archive` |
+| `-I, --codex-index-db <PATH>` | `CODEX_INDEX_DB` | `./codex_index.sqlite` |
+| `-S, --summary-layer <PATH>` | `SUMMARY_LAYER_JSON` | `./summary_layer.json` |
+| `-F, --fts5-index <PATH>` | `FTS5_INDEX_JSON` | `./fts5_index.json` |
 
 ## Results
 
 Measured on my own session history:
 
-| Target | Files | Raw size | After |
+| Target | Files | Raw size | Result |
 |--------|------:|---------:|-------|
-| Codex sessions | 3,037 | 3.1 GB | **2.42 GB → 0.86 GB** for the archived set (2,303 sessions, ≈64% smaller) |
-| Hermes sessions | 82 | 47 MB | summarized → `summary_layer.json` + `fts5_index.json` |
+| Codex sessions | 3,037 | 3.1 GB | archived set (2,303 sessions) **2.42 GB → 0.86 GB** (~64% smaller) |
+| Hermes sessions | 82 (52 `session_*.json`) | 47 MB | 52 sessions summarized → `summary_layer.json` + `fts5_index.json` |
 
-In other words, **~2.4 GB of old Codex sessions now lives in ~860 MB** while remaining fully searchable through the SQLite + FTS5 index. Deleting the originals after archiving reclaims the rest.
+**~2.4 GB of old Codex sessions now lives in ~860 MB** while remaining fully searchable through the SQLite + FTS5 index. Deleting originals with `archive --move` reclaims the rest.
 
 ## Safety
 
-- Original session files are **never auto-deleted** by any phase. Compression produces `.jsonl.zst` copies; originals are only moved aside when you explicitly restore/quarantine.
+- By default, no command deletes originals. Compression produces `.jsonl.zst` copies; originals stay.
+- Explicit deletion only: `archive --move` (delete originals after compressing), `restore --purge` (delete `.zst` after restoring).
 - Sessions newer than the retention window (`--days`, default `30`) are skipped.
-- Every archived file gets a SHA-256 checksum in `checksums.jsonl`, so `restore` can verify integrity.
+- Every archived file gets a SHA-256 checksum stored in the SQLite index, so `restore` verifies integrity and detects corruption.
 
 ## Status
 
-Rust port of an original Python prototype. The 4-phase pipeline, TUI, and CLI are all functional. Output of phases 1 & 4 is verified to match the Python reference; phase 2 is faithful.
+Scan/index, archive/restore (SQLite-backed), compaction, summarization, TUI, and CLI are all functional.
 
 ## License
 

@@ -1,8 +1,9 @@
 //! Phase 2: Codex 세션 압축 (zstd) 및 관리
 
 use crate::config::Config;
+use crate::db::SessionDb;
 use crate::error::{Error, Result};
-use crate::types::ArchivedSession;
+use crate::types::{ArchivedSession, ArchivedSessionRow, SessionInfo};
 use chrono::Datelike;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -10,8 +11,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use walkdir::WalkDir;
 use zstd::stream::Encoder;
-
-const CHECKSUM_FILE: &str = "checksums.jsonl";
 
 /// Codex 세션 아카이버
 pub struct SessionArchiver {
@@ -114,8 +113,39 @@ impl SessionArchiver {
             .collect()
     }
 
+    /// 세션의 .zst 보관본 대상 경로 계산 (archive 전용).
+    /// restore는 이 함수 대신 DB의 compressed_path를 직접 사용한다.
+    fn zst_dest_path(&self, session: &SessionInfo) -> PathBuf {
+        let src = &session.path;
+        let dest = &self.config.codex_archive;
+
+        let dest_path = if let Some(date) = session.date {
+            let relative = src.strip_prefix(&self.config.codex_sessions)
+                .unwrap_or(src);
+
+            // 연도 제거 (sessions/2026/06/03 -> 06/03)
+            let parts: Vec<&str> = relative.components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .collect();
+
+            let date_path = if parts.len() >= 3 {
+                // 월/일/파일 형태로 변환
+                format!("{}/{}/{}", date.month(), date.day(),
+                    src.file_name().unwrap().to_string_lossy())
+            } else {
+                src.file_name().unwrap().to_string_lossy().to_string()
+            };
+
+            dest.join(date.to_string()).join(date_path)
+        } else {
+            dest.join(src.file_name().unwrap().to_string_lossy().as_ref())
+        };
+
+        PathBuf::from(format!("{}.zst", dest_path.display()))
+    }
+
     /// 세션 압축
-    pub fn archive(&self, sessions: &[&SessionInfo], dry_run: bool) -> Result<ArchiveResult> {
+    pub fn archive(&self, sessions: &[&SessionInfo], dry_run: bool, move_originals: bool, db: &SessionDb) -> Result<ArchiveResult> {
         let dest = &self.config.codex_archive;
         fs::create_dir_all(dest)
             .map_err(|e| Error::Io(e))?;
@@ -127,30 +157,7 @@ impl SessionArchiver {
 
         for session in sessions {
             let src = &session.path;
-
-            // 대상 경로 계산
-            let dest_path = if let Some(date) = session.date {
-                let relative = src.strip_prefix(&self.config.codex_sessions)
-                    .unwrap_or(src);
-
-                // 연도 제거 (sessions/2026/06/03 -> 06/03)
-                let parts: Vec<&str> = relative.components()
-                    .filter_map(|c| c.as_os_str().to_str())
-                    .collect();
-
-                let date_path = if parts.len() >= 3 {
-                    // 월/일/파일 형태로 변환
-                    format!("{}/{}/{}", date.month(), date.day(), src.file_name().unwrap().to_string_lossy())
-                } else {
-                    src.file_name().unwrap().to_string_lossy().to_string()
-                };
-
-                dest.join(date.to_string()).join(date_path)
-            } else {
-                dest.join(src.file_name().unwrap().to_string_lossy().as_ref())
-            };
-
-            let zst_path = PathBuf::from(format!("{}.zst", dest_path.display()));
+            let zst_path = self.zst_dest_path(session);
 
             if dry_run {
                 skipped.push((**session).clone());
@@ -158,7 +165,7 @@ impl SessionArchiver {
             }
 
             // 대상 디렉토리 생성 (dry-run이 아닐 때만)
-            dest_path.parent().map(|p| fs::create_dir_all(p))
+            zst_path.parent().map(|p| fs::create_dir_all(p))
                 .transpose()
                 .map_err(|e| Error::Io(e))?;
 
@@ -166,6 +173,22 @@ impl SessionArchiver {
             match self.compress_file(src, &zst_path) {
                 Ok(compressed_size) => {
                     let checksum = self.sha256_file(src)?;
+
+                    // DB에 archived 상태 기록 (session_id 필수)
+                    if let Some(ref sid) = session.session_id {
+                        if let Err(e) = db.mark_archived(sid, &zst_path, &checksum) {
+                            eprintln!("ERROR marking archived {}: {}", src.display(), e);
+                        }
+                    } else {
+                        eprintln!("WARNING: {} session_id 없음, DB 상태 기록 생략", src.display());
+                    }
+
+                    // --move: 압축+DB 기록 성공 후에만 원본 삭제
+                    if move_originals {
+                        if let Err(e) = fs::remove_file(src) {
+                            eprintln!("WARNING: 원본 삭제 실패 {}: {}", src.display(), e);
+                        }
+                    }
 
                     archived.push(ArchivedSession {
                         original: src.clone(),
@@ -183,20 +206,6 @@ impl SessionArchiver {
                     eprintln!("ERROR compressing {}: {}", src.display(), e);
                     skipped.push((**session).clone());
                 }
-            }
-        }
-
-        // 체크섬 파일 작성
-        if !dry_run && !archived.is_empty() {
-            let checksum_path = dest.join(CHECKSUM_FILE);
-            let mut file = File::create(&checksum_path)
-                .map_err(|e| Error::Io(e))?;
-
-            for entry in &archived {
-                let line = serde_json::to_string(entry)
-                    .map_err(|e| Error::Json(e))?;
-                writeln!(file, "{}", line)
-                    .map_err(|e| Error::Io(e))?;
             }
         }
 
@@ -253,29 +262,46 @@ impl SessionArchiver {
 
     /// 파일 압축 해제
     pub fn decompress_file(&self, src: &Path, dest: &Path) -> Result<()> {
-        let src_file = File::open(src)
-            .map_err(|e| Error::Io(e))?;
-        let dest_file = File::create(dest)
-            .map_err(|e| Error::Io(e))?;
+        // 임시 파일에 해제한 뒤 rename — 실패해도 dest(원본 자리)가 truncate되지 않도록
+        let tmp = PathBuf::from(format!("{}.part", dest.display()));
 
-        let reader = io::BufReader::new(src_file);
-        let mut writer = io::BufWriter::new(dest_file);
+        let result = (|| -> Result<()> {
+            let src_file = File::open(src)
+                .map_err(|e| Error::Io(e))?;
+            let tmp_file = File::create(&tmp)
+                .map_err(|e| Error::Io(e))?;
 
-        // zstd decoder 사용
-        let mut decoder = zstd::stream::Decoder::new(reader)
-            .map_err(|e| Error::Compression(e.to_string()))?;
+            let reader = io::BufReader::new(src_file);
+            let mut writer = io::BufWriter::new(tmp_file);
 
-        io::copy(&mut decoder, &mut writer)
-            .map_err(|e| Error::Io(e))?;
+            // zstd decoder 사용
+            let mut decoder = zstd::stream::Decoder::new(reader)
+                .map_err(|e| Error::Compression(e.to_string()))?;
 
-        writer.flush()
-            .map_err(|e| Error::Io(e))?;
+            io::copy(&mut decoder, &mut writer)
+                .map_err(|e| Error::Io(e))?;
 
-        Ok(())
+            writer.flush()
+                .map_err(|e| Error::Io(e))?;
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                fs::rename(&tmp, dest).map_err(|e| Error::Io(e))?;
+                Ok(())
+            }
+            Err(e) => {
+                // 실패 시 임시 파일 정리 (dest는 건드리지 않음)
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     /// SHA256 체크섬 계산
-    fn sha256_file(&self, path: &Path) -> Result<String> {
+    pub(crate) fn sha256_file(&self, path: &Path) -> Result<String> {
         use sha2::{Digest, Sha256};
 
         let mut file = File::open(path)
@@ -295,42 +321,61 @@ impl SessionArchiver {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    /// 세션 복원
-    pub fn restore(&self, sessions: &[&SessionInfo], dry_run: bool) -> Result<Vec<SessionInfo>> {
+    /// 세션 복원 (DB의 archived 세션을 대상).
+    /// discover_sessions()에 의존하지 않고 ArchivedSessionRow(compressed_path)를 직접 사용.
+    pub fn restore(&self, rows: &[ArchivedSessionRow], dry_run: bool, purge: bool, db: &SessionDb) -> Result<Vec<ArchivedSessionRow>> {
         let mut restored = Vec::new();
 
-        for session in sessions {
-            let src = &session.path;
+        for row in rows {
+            let zst = &row.compressed_path;
+            let dest = &row.path;
 
-            // .zst 경로 계산
-            let zst_path = if let Some(date) = session.date {
-                let date_path = format!("{}/{}/{}.zst",
-                    date.month(),
-                    date.day(),
-                    src.file_name().unwrap().to_string_lossy()
-                );
-
-                self.config.codex_archive.join(date.to_string()).join(date_path)
-            } else {
-                self.config.codex_archive.join(format!("{}.zst",
-                    src.file_name().unwrap().to_string_lossy()
-                ))
-            };
-
-            if !zst_path.exists() {
-                eprintln!("WARNING: {} not found, skipping", zst_path.display());
+            if !zst.exists() {
+                eprintln!("WARNING: 보관본 없음, skip: {}", zst.display());
                 continue;
             }
 
             if dry_run {
-                println!("  restore {} -> {}", zst_path.display(), src.display());
-                restored.push((**session).clone());
+                println!("  restore {} -> {}", zst.display(), dest.display());
+                restored.push(row.clone());
                 continue;
             }
 
-            match self.decompress_file(&zst_path, src) {
-                Ok(_) => restored.push((**session).clone()),
-                Err(e) => eprintln!("ERROR restoring {}: {}", zst_path.display(), e),
+            // 복원 대상 디렉토리 보장 (--move로 원본과 함께 디렉토리가 사라졌을 수 있음)
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("ERROR 복원 디렉토리 생성 실패 {}: {}", dest.display(), e);
+                    continue;
+                }
+            }
+
+            match self.decompress_file(zst, dest) {
+                Ok(_) => {
+                    // 무결성 검증 (체크섬이 있을 때)
+                    if !row.checksum_sha256.is_empty() {
+                        match self.sha256_file(dest) {
+                            Ok(actual) if actual == row.checksum_sha256 => {}
+                            Ok(actual) => {
+                                eprintln!("WARNING 체크섬 불일치 {}: expected {} got {}",
+                                    dest.display(), row.checksum_sha256, actual);
+                            }
+                            Err(e) => eprintln!("WARNING 체크섬 계산 실패 {}: {}", dest.display(), e),
+                        }
+                    }
+
+                    // purge: 보관본 삭제 + DB archived 해제
+                    if purge {
+                        if let Err(e) = fs::remove_file(zst) {
+                            eprintln!("WARNING 보관본 삭제 실패 {}: {}", zst.display(), e);
+                        }
+                        if let Err(e) = db.mark_purged(&row.session_id) {
+                            eprintln!("ERROR DB purge 표시 실패 {}: {}", row.session_id, e);
+                        }
+                    }
+
+                    restored.push(row.clone());
+                }
+                Err(e) => eprintln!("ERROR restoring {}: {}", zst.display(), e),
             }
         }
 
@@ -418,17 +463,6 @@ impl SessionArchiver {
 
         Ok(())
     }
-}
-
-/// 세션 정보
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionInfo {
-    pub path: PathBuf,
-    pub date: Option<chrono::NaiveDate>,
-    pub size_bytes: u64,
-    pub session_id: Option<String>,
-    pub model_provider: Option<String>,
-    pub cli_version: Option<String>,
 }
 
 /// 아카이브 결과

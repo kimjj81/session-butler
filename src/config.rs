@@ -15,6 +15,7 @@ const DEFAULT_FTS5_INDEX: &str = "./fts5_index.json";
 
 /// Session Butler 설정
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Codex 세션 디렉토리
     pub codex_sessions: PathBuf,
@@ -32,6 +33,10 @@ pub struct Config {
     pub fts5_index: PathBuf,
     /// 압축 기본 일수
     pub default_archive_days: u64,
+    /// Codex 백엔드 활성화
+    pub enabled_codex: bool,
+    /// Hermes 백엔드 활성화
+    pub enabled_hermes: bool,
 }
 
 impl Default for Config {
@@ -52,36 +57,73 @@ impl Config {
             summary_layer: PathBuf::from(DEFAULT_SUMMARY_LAYER),
             fts5_index: PathBuf::from(DEFAULT_FTS5_INDEX),
             default_archive_days: 30,
+            enabled_codex: true,
+            enabled_hermes: true,
         }
     }
 
     /// 환경변수로부터 설정 로드
     pub fn from_env() -> Self {
         let mut config = Self::new();
+        config.apply_env();
+        config
+    }
 
+    /// 환경변수를 현재 설정에 적용 (우선순위: default → config 파일 → 환경변수)
+    pub fn apply_env(&mut self) {
         if let Ok(path) = std::env::var("CODEX_SESSIONS") {
-            config.codex_sessions = expand_path(&path);
+            self.codex_sessions = expand_path(&path);
         }
         if let Ok(path) = std::env::var("CODEX_ARCHIVE") {
-            config.codex_archive = expand_path(&path);
+            self.codex_archive = expand_path(&path);
         }
         if let Ok(path) = std::env::var("HERMES_SESSIONS") {
-            config.hermes_sessions = expand_path(&path);
+            self.hermes_sessions = expand_path(&path);
         }
         if let Ok(path) = std::env::var("CODEX_STATE_DB") {
-            config.codex_state_db = expand_path(&path);
+            self.codex_state_db = expand_path(&path);
         }
         if let Ok(path) = std::env::var("CODEX_INDEX_DB") {
-            config.codex_index_db = PathBuf::from(&path);
+            self.codex_index_db = PathBuf::from(&path);
         }
         if let Ok(path) = std::env::var("SUMMARY_LAYER_JSON") {
-            config.summary_layer = PathBuf::from(&path);
+            self.summary_layer = PathBuf::from(&path);
         }
         if let Ok(path) = std::env::var("FTS5_INDEX_JSON") {
-            config.fts5_index = PathBuf::from(&path);
+            self.fts5_index = PathBuf::from(&path);
+        }
+        if let Some(b) = parse_bool_env("CODEX_ENABLED") {
+            self.enabled_codex = b;
+        }
+        if let Some(b) = parse_bool_env("HERMES_ENABLED") {
+            self.enabled_hermes = b;
+        }
+    }
+
+    /// 설정 로드 (default → config 파일 → 환경변수).
+    /// CLI 플래그(`--no-codex`/`--no-hermes`)는 cli::build_config에서 최종 적용.
+    pub fn load() -> Self {
+        let mut config = Self::default();
+
+        if let Some(path) = Self::config_file_path() {
+            if path.exists() {
+                match Self::from_file(&path) {
+                    Ok(file_config) => config = file_config,
+                    Err(e) => eprintln!(
+                        "WARNING: config 파일 로드 실패 (기본값 사용) {}: {}",
+                        path.display(), e
+                    ),
+                }
+            }
         }
 
+        config.apply_env();
         config
+    }
+
+    /// 기본 config 파일 경로 (플랫폼 무관 ~/.config/session-butler/config.json)
+    pub fn config_file_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".config").join("session-butler").join("config.json"))
     }
 
     /// 파일에서 설정 로드
@@ -129,6 +171,14 @@ fn expand_path(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+/// 환경변수를 bool로 파싱 ("0"/"false"/"off"/"no" → false, 그 외 → true)
+fn parse_bool_env(key: &str) -> Option<bool> {
+    std::env::var(key).ok().map(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        !(v == "0" || v == "false" || v == "off" || v == "no")
+    })
 }
 
 #[cfg(test)]

@@ -79,6 +79,25 @@ pub enum ArgType {
     Path,
 }
 
+/// 메뉴/기능이 속한 백엔드
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Backend {
+    Codex,
+    Hermes,
+    Both,
+}
+
+impl Backend {
+    /// 주어진 설정에서 이 백엔드를 노출할지
+    fn visible(self, config: &Config) -> bool {
+        match self {
+            Backend::Codex => config.enabled_codex,
+            Backend::Hermes => config.enabled_hermes,
+            Backend::Both => config.enabled_codex || config.enabled_hermes,
+        }
+    }
+}
+
 /// 실행 결과
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -118,7 +137,7 @@ impl TuiApp {
                 id: "archive".to_string(),
                 title: "Phase 2: Archive".to_string(),
                 description: "zstd 압축 및 checksum 생성".to_string(),
-                command: Commands::Archive { days: 30, dry_run: false },
+                command: Commands::Archive { days: 30, dry_run: false, move_: false, skip_scan: false },
                 args: vec![
                     Arg {
                         name: "days".to_string(),
@@ -145,6 +164,7 @@ impl TuiApp {
                     all: false,
                     days: 30,
                     dry_run: false,
+                    purge: false,
                 },
                 args: vec![
                     Arg {
@@ -309,20 +329,32 @@ impl TuiApp {
         items.get(self.selected_index).copied()
     }
 
-    fn get_filtered_items(&self) -> Vec<&MenuItem> {
-        if self.filter_text.is_empty() {
-            self.menu_items.iter().collect()
-        } else {
-            self.menu_items
-                .iter()
-                .filter(|item| {
-                    item.title.to_lowercase().contains(&self.filter_text.to_lowercase())
-                        || item.description
-                            .to_lowercase()
-                            .contains(&self.filter_text.to_lowercase())
-                })
-                .collect()
+    /// 메뉴 id → 백엔드 매핑
+    fn item_backend(id: &str) -> Backend {
+        match id {
+            "summarize" => Backend::Hermes,
+            "pipeline" => Backend::Both,
+            _ => Backend::Codex,
         }
+    }
+
+    fn get_filtered_items(&self) -> Vec<&MenuItem> {
+        let filter = self.filter_text.to_lowercase();
+        self.menu_items
+            .iter()
+            .filter(|item| {
+                // 활성 백엔드만 노출
+                if !Self::item_backend(&item.id).visible(&self.config) {
+                    return false;
+                }
+                // 텍스트 필터
+                if filter.is_empty() {
+                    return true;
+                }
+                item.title.to_lowercase().contains(&filter)
+                    || item.description.to_lowercase().contains(&filter)
+            })
+            .collect()
     }
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
@@ -510,16 +542,20 @@ impl TuiApp {
             Commands::Archive { .. } => {
                 let days = get_val("days").parse().unwrap_or(30);
                 let dry_run = get_val("dry_run") == "true";
-                Commands::Archive { days, dry_run }
+                let move_ = get_val("move") == "true";
+                let skip_scan = get_val("skip_scan") == "true";
+                Commands::Archive { days, dry_run, move_, skip_scan }
             }
             Commands::Restore { .. } => {
                 let days = get_val("days").parse().unwrap_or(30);
                 let dry_run = get_val("dry_run") == "true";
+                let purge = get_val("purge") == "true";
                 Commands::Restore {
                     session_id: None,
                     all: false,
                     days,
                     dry_run,
+                    purge,
                 }
             }
             Commands::List { .. } => {
@@ -589,7 +625,12 @@ impl TuiApp {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length(3), // header
+                Constraint::Length(3), // status (활성 백엔드/경로)
+                Constraint::Min(0),    // main
+                Constraint::Length(3), // footer
+            ])
             .split(size);
 
         // 헤더
@@ -600,19 +641,22 @@ impl TuiApp {
         ]))
         .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded))
         .alignment(Alignment::Center);
-
         f.render_widget(header, chunks[0]);
+
+        // status 바: 활성 백엔드 + 세션 경로 + 보존 일수
+        let status = self.create_status_bar();
+        f.render_widget(status, chunks[1]);
 
         // 메인 컨텐츠
         match self.state {
             TuiState::MainMenu | TuiState::Input | TuiState::Confirm => {
-                self.render_main_menu(f, chunks[1]);
+                self.render_main_menu(f, chunks[2]);
             }
             TuiState::Running => {
-                self.render_running(f, chunks[1]);
+                self.render_running(f, chunks[2]);
             }
             TuiState::Results => {
-                self.render_results(f, chunks[1]);
+                self.render_results(f, chunks[2]);
             }
         }
 
@@ -623,11 +667,39 @@ impl TuiApp {
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::Gray));
 
-        f.render_widget(footer_paragraph, chunks[2]);
+        f.render_widget(footer_paragraph, chunks[3]);
 
         if self.show_help {
             self.render_help(f);
         }
+    }
+
+    /// 상단 status 바 — 활성 백엔드 + codex/hermes 세션 경로 + 보존 일수
+    fn create_status_bar(&self) -> Paragraph<'_> {
+        let codex_on = self.config.enabled_codex;
+        let hermes_on = self.config.enabled_hermes;
+        let label = |b: bool| if b { "ON" } else { "OFF" };
+        let color = |b: bool| if b { Color::Green } else { Color::DarkGray };
+
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("[Codex: {}]", label(codex_on)),
+                Style::default().fg(color(codex_on)).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("[Hermes: {}]", label(hermes_on)),
+                Style::default().fg(color(hermes_on)).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  codex: {}  hermes: {}  days: {}",
+                self.config.codex_sessions.display(),
+                self.config.hermes_sessions.display(),
+                self.config.default_archive_days,
+            )),
+        ]))
+        .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded))
+        .alignment(Alignment::Left)
     }
 
     fn render_main_menu(&self, f: &mut Frame, area: Rect) {

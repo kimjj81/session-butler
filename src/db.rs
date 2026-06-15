@@ -1,10 +1,10 @@
 //! SQLite 데이터베이스 연산 (FTS5 포함)
 
 use crate::error::{Error, Result};
-use crate::types::CodexSessionMeta;
+use crate::types::{ArchivedSessionRow, CodexSessionMeta, SessionInfo};
 use chrono::Utc;
 use rusqlite::{Connection, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 세션 인덱스 데이터베이스 매니저
 pub struct SessionDb {
@@ -50,7 +50,12 @@ impl SessionDb {
                 line_count INTEGER DEFAULT 0,
                 corrupt_lines INTEGER DEFAULT 0,
                 has_user_event INTEGER DEFAULT 0,
-                indexed_at TEXT
+                size_bytes INTEGER DEFAULT 0,
+                indexed_at TEXT,
+                archived INTEGER DEFAULT 0,
+                compressed_path TEXT,
+                checksum_sha256 TEXT,
+                archived_at TEXT
             )",
             [],
         ).map_err(|e| Error::Sqlite(e))?;
@@ -67,7 +72,52 @@ impl SessionDb {
             [],
         ).map_err(|e| Error::Sqlite(e))?;
 
+        self.migrate()?;
+
         Ok(())
+    }
+
+    /// 스키마 마이그레이션 (user_version 기반)
+    fn migrate(&self) -> Result<()> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| Error::Sqlite(e))?;
+
+        if version < 1 {
+            let existing = self.existing_columns("sessions")?;
+            // 기존 DB 호환: 누락된 컬럼만 추가
+            let additions: &[(&str, &str)] = &[
+                ("size_bytes", "INTEGER DEFAULT 0"),
+                ("archived", "INTEGER DEFAULT 0"),
+                ("compressed_path", "TEXT"),
+                ("checksum_sha256", "TEXT"),
+                ("archived_at", "TEXT"),
+            ];
+            for (col, def) in additions {
+                if !existing.iter().any(|c| c == col) {
+                    let sql = format!("ALTER TABLE sessions ADD COLUMN {} {}", col, def);
+                    self.conn.execute(&sql, [])
+                        .map_err(|e| Error::Sqlite(e))?;
+                }
+            }
+            self.conn.execute("PRAGMA user_version = 1", [])
+                .map_err(|e| Error::Sqlite(e))?;
+        }
+
+        Ok(())
+    }
+
+    /// 테이블의 컬럼 이름 목록 조회
+    fn existing_columns(&self, table: &str) -> Result<Vec<String>> {
+        let sql = format!("PRAGMA table_info({})", table);
+        let mut stmt = self.conn.prepare(&sql)
+            .map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map([], |row| {
+            let name: String = row.get(1)?;
+            Ok(name)
+        }).map_err(|e| Error::Sqlite(e))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
     }
 
     /// 세션 upsert
@@ -83,8 +133,8 @@ impl SessionDb {
                                   model_provider, cli_version, source, model,
                                   git_sha, git_branch, git_origin_url,
                                   tool_call_count, file_change_count, total_tokens,
-                                  line_count, corrupt_lines, has_user_event, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                                  line_count, corrupt_lines, has_user_event, size_bytes, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(session_id) DO UPDATE SET
                 path=excluded.path, date=excluded.date, cwd=excluded.cwd,
                 first_user_prompt=excluded.first_user_prompt, model_provider=excluded.model_provider,
@@ -93,7 +143,7 @@ impl SessionDb {
                 git_origin_url=excluded.git_origin_url, tool_call_count=excluded.tool_call_count,
                 file_change_count=excluded.file_change_count, total_tokens=excluded.total_tokens,
                 line_count=excluded.line_count, corrupt_lines=excluded.corrupt_lines,
-                has_user_event=excluded.has_user_event, indexed_at=excluded.indexed_at"
+                has_user_event=excluded.has_user_event, size_bytes=excluded.size_bytes, indexed_at=excluded.indexed_at"
         ).map_err(|e| Error::Sqlite(e))?;
 
         stmt.execute(params![
@@ -115,13 +165,19 @@ impl SessionDb {
             meta.line_count as i64,
             meta.corrupt_lines as i64,
             has_user_event,
+            meta.size_bytes as i64,
             &indexed_at,
         ]).map_err(|e| Error::Sqlite(e))?;
 
-        // FTS5 업데이트
+        // FTS5 업데이트 (기존 행 삭제 후 삽입 - 재인덱싱 시 중복 적재 방지)
         let first_prompt = meta.first_user_prompt.as_deref().unwrap_or("");
         let cwd = meta.cwd.as_deref().unwrap_or("");
         let git_url = meta.git_origin_url.as_deref().unwrap_or("");
+
+        self.conn.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            params![&meta.session_id],
+        ).map_err(|e| Error::Sqlite(e))?;
 
         let mut fts_stmt = self.conn.prepare_cached(
             "INSERT INTO sessions_fts(session_id, first_user_prompt, cwd, git_origin_url)
@@ -146,6 +202,132 @@ impl SessionDb {
         let count = stmt.query_row([], |row| row.get(0))
             .map_err(|e| Error::Sqlite(e))?;
 
+        Ok(count)
+    }
+
+    /// DB 행 → ArchivedSessionRow 변환 (associated helper)
+    fn archived_row(row: &rusqlite::Row) -> rusqlite::Result<ArchivedSessionRow> {
+        Ok(ArchivedSessionRow {
+            session_id: row.get(0)?,
+            path: PathBuf::from(row.get::<_, Option<String>>(1)?.unwrap_or_default()),
+            date: row.get(2)?,
+            compressed_path: PathBuf::from(row.get::<_, Option<String>>(3)?.unwrap_or_default()),
+            checksum_sha256: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        })
+    }
+
+    /// days일 이후 cutoff 날짜 문자열 (ISO yyyy-mm-dd)
+    fn days_cutoff(days: u64) -> String {
+        (Utc::now() - chrono::Duration::days(days as i64)).date_naive().to_string()
+    }
+
+    /// 세션을 archived로 표시 (보관본 경로/체크섬 기록)
+    pub fn mark_archived(&self, session_id: &str, compressed_path: &Path, checksum: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET archived = 1, compressed_path = ?1, checksum_sha256 = ?2, archived_at = ?3
+             WHERE session_id = ?4",
+            params![
+                compressed_path.to_string_lossy().as_ref(),
+                checksum,
+                Utc::now().to_rfc3339(),
+                session_id,
+            ],
+        ).map_err(|e| Error::Sqlite(e))?;
+        Ok(())
+    }
+
+    /// archived 해제 + 보관본 메타 제거 (restore --purge)
+    pub fn mark_purged(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET archived = 0, compressed_path = NULL, checksum_sha256 = NULL, archived_at = NULL
+             WHERE session_id = ?1",
+            params![session_id],
+        ).map_err(|e| Error::Sqlite(e))?;
+        Ok(())
+    }
+
+    /// archived 세션 전체 조회
+    pub fn list_archived(&self) -> Result<Vec<ArchivedSessionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, path, date, compressed_path, checksum_sha256
+             FROM sessions WHERE archived = 1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map([], Self::archived_row)
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// session_id 목록으로 archived 세션 조회 (restore --session-id)
+    pub fn list_archived_by_ids(&self, ids: &[String]) -> Result<Vec<ArchivedSessionRow>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT session_id, path, date, compressed_path, checksum_sha256
+             FROM sessions WHERE archived = 1 AND session_id IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), Self::archived_row)
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 최근 days일 이내의 archived 세션 조회 (restore -d N)
+    pub fn list_archived_by_days(&self, days: u64) -> Result<Vec<ArchivedSessionRow>> {
+        let cutoff = Self::days_cutoff(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, path, date, compressed_path, checksum_sha256
+             FROM sessions WHERE archived = 1 AND date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], Self::archived_row)
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 최근 days일 이내의 활성(archived 아님) 세션 조회 (archive 대상 선정)
+    pub fn list_active_by_days(&self, days: u64) -> Result<Vec<SessionInfo>> {
+        let cutoff = Self::days_cutoff(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT path, date, size_bytes, session_id, model_provider, cli_version
+             FROM sessions WHERE archived = 0 AND date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            let path: String = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+            let date_str: Option<String> = row.get(1)?;
+            let size_bytes: i64 = row.get(2).unwrap_or(0);
+            let session_id: Option<String> = row.get(3)?;
+            let model_provider: Option<String> = row.get(4)?;
+            let cli_version: Option<String> = row.get(5)?;
+            let date = date_str.as_deref()
+                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
+            Ok(SessionInfo {
+                path: PathBuf::from(path),
+                date,
+                size_bytes: size_bytes as u64,
+                session_id,
+                model_provider,
+                cli_version,
+            })
+        }).map_err(|e| Error::Sqlite(e))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// archived 세션 수 (stats용)
+    pub fn count_archived(&self) -> Result<i64> {
+        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM sessions WHERE archived = 1")
+            .map_err(|e| Error::Sqlite(e))?;
+        let count = stmt.query_row([], |row| row.get(0))
+            .map_err(|e| Error::Sqlite(e))?;
         Ok(count)
     }
 
@@ -266,6 +448,7 @@ mod tests {
             line_count: 100,
             corrupt_lines: 0,
             has_user_event: true,
+            size_bytes: 0,
             indexed_at: Some(Utc::now()),
         };
 

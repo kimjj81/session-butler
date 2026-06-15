@@ -22,7 +22,7 @@ fn main() {
     let run_tui_mode = args.len() == 1 || args.iter().any(|a| a == "--tui" || a == "-t");
 
     if run_tui_mode {
-        let config = Config::from_env();
+        let config = Config::load();
         if let Err(e) = run_tui(config) {
             eprintln!("TUI error: {}", e);
             process::exit(1);

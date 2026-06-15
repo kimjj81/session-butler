@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::types::CodexSessionMeta;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -23,7 +23,7 @@ impl SessionDb {
         let conn = Connection::open(path)
             .map_err(|e| Error::Sqlite(e))?;
 
-        let mut db = Self { conn };
+        let db = Self { conn };
         db.init_tables()?;
         Ok(db)
     }

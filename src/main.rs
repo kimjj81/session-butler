@@ -6,7 +6,6 @@ use clap::Parser;
 use session_butler::cli::run;
 use session_butler::cli::Cli;
 use session_butler::config::Config;
-use session_butler::error::Result;
 use session_butler::tui::run_tui;
 use std::process;
 use tracing_subscriber;

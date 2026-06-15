@@ -3,20 +3,11 @@
 use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
-use crate::types::{CodexSessionMeta, GitInfo, JsonlRecord, ResponseItemPayload, SessionMetaPayload};
-use chrono::{DateTime, TimeZone, Utc};
+use crate::types::CodexSessionMeta;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use walkdir::WalkDir;
-
-/// JSONL 파일의 각 라인 파싱 결과
-#[derive(Debug)]
-struct JsonlLine {
-    line_number: usize,
-    record: Option<JsonlRecord>,
-    is_corrupt: bool,
-}
 
 /// Codex 세션 스캐너
 pub struct CodexScanner {
@@ -286,7 +277,7 @@ impl CodexScanner {
 
     /// 스캔 결과를 DB에 인덱싱
     pub fn index_sessions(&self, metas: Vec<CodexSessionMeta>) -> Result<()> {
-        let mut db = SessionDb::new(&self.config.codex_index_db)?;
+        let db = SessionDb::new(&self.config.codex_index_db)?;
 
         db.begin_transaction()?;
 

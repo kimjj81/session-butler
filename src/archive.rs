@@ -4,7 +4,6 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::types::ArchivedSession;
 use chrono::Datelike;
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -158,7 +157,7 @@ impl SessionArchiver {
             let zst_path = PathBuf::from(format!("{}.zst", dest_path.display()));
 
             if dry_run {
-                skipped.push(session.clone().clone());
+                skipped.push((**session).clone());
                 continue;
             }
 
@@ -181,7 +180,7 @@ impl SessionArchiver {
                 }
                 Err(e) => {
                     eprintln!("ERROR compressing {}: {}", src.display(), e);
-                    skipped.push(session.clone().clone());
+                    skipped.push((**session).clone());
                 }
             }
         }
@@ -258,7 +257,7 @@ impl SessionArchiver {
         let dest_file = File::create(dest)
             .map_err(|e| Error::Io(e))?;
 
-        let mut reader = io::BufReader::new(src_file);
+        let reader = io::BufReader::new(src_file);
         let mut writer = io::BufWriter::new(dest_file);
 
         // zstd decoder 사용
@@ -304,9 +303,6 @@ impl SessionArchiver {
 
             // .zst 경로 계산
             let zst_path = if let Some(date) = session.date {
-                let relative = src.strip_prefix(&self.config.codex_sessions)
-                    .unwrap_or(src);
-
                 let date_path = format!("{}/{}/{}.zst",
                     date.month(),
                     date.day(),
@@ -327,12 +323,12 @@ impl SessionArchiver {
 
             if dry_run {
                 println!("  restore {} -> {}", zst_path.display(), src.display());
-                restored.push(session.clone().clone());
+                restored.push((**session).clone());
                 continue;
             }
 
             match self.decompress_file(&zst_path, src) {
-                Ok(_) => restored.push(session.clone().clone()),
+                Ok(_) => restored.push((**session).clone()),
                 Err(e) => eprintln!("ERROR restoring {}: {}", zst_path.display(), e),
             }
         }
@@ -364,7 +360,7 @@ impl SessionArchiver {
                     total_size as f64 / (1024.0 * 1024.0)
                 );
 
-                for (i, session) in items.iter().take(5).enumerate() {
+                for session in items.iter().take(5) {
                     println!("  {} ({:.0}KB) model={}",
                         session.path.file_name().unwrap().to_string_lossy(),
                         session.size_bytes as f64 / 1024.0,

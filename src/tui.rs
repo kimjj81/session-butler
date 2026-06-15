@@ -89,6 +89,7 @@ pub struct ExecutionResult {
 
 /// TUI 앱
 pub struct TuiApp {
+    #[allow(dead_code)]
     config: Config,
     state: TuiState,
     menu_items: Vec<MenuItem>,
@@ -569,9 +570,6 @@ impl TuiApp {
         self.output_buffer = format!("Executing {:?}...\n", command);
 
         // 실제 명령 실행 - 여기서 CLI 모듈의 run 함수 사용
-        use crate::cli::Cli;
-        use clap::Parser;
-
         // TUI에서 실행 시 stdout을 캡처해야 함
         // 임시로 표시만 하고 실제 실행은 별도 스레드에서 처리 필요
         self.output_buffer.push_str("Command executed successfully.\n");

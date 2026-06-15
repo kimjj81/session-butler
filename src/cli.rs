@@ -70,18 +70,18 @@ pub struct Cli {
 pub enum Commands {
     /// Codex: scan & index sessions (FTS5 full-text index)
     Scan {
-        /// 분석 리포트 생성
+        /// Generate analysis report
         #[arg(long)]
         analyze: bool,
     },
 
     /// Codex: compress sessions (--move deletes originals, --skip-scan skips pre-scan)
     Archive {
-        /// 보존 일수 (이전 세션만 대상)
+        /// Retention days (only older sessions)
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
-        /// Dry-run (실제 실행 안 함)
+        /// Dry-run (no actual execution)
         #[arg(long)]
         dry_run: bool,
 
@@ -96,15 +96,15 @@ pub enum Commands {
 
     /// Codex: restore sessions (from DB archive index, --purge deletes .zst)
     Restore {
-        /// 복원할 세션 ID
+        /// Session ID to restore
         #[arg(long)]
         session_id: Option<String>,
 
-        /// 전체 복원
+        /// Restore all
         #[arg(long)]
         all: bool,
 
-        /// 대상 일수
+        /// Target days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
@@ -119,25 +119,25 @@ pub enum Commands {
 
     /// Codex: list sessions
     List {
-        /// 대상 일수
+        /// Target days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
-        /// JSON 출력
+        /// JSON output
         #[arg(long)]
         json: bool,
     },
 
     /// Codex: statistics
     Stats {
-        /// 대상 일수
+        /// Target days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
     },
 
     /// Codex: compaction + sensitive-info (.env/token/key) scan
     Compact {
-        /// 대상 일수
+        /// Target days
         #[arg(short = 'd', long, default_value = "0")]
         days: u64,
 
@@ -145,41 +145,41 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// 민감정보 스캔만 수행
+        /// Scan sensitive info only
         #[arg(long)]
         scan_sensitive: bool,
     },
 
     /// Hermes: summarize sessions (summary + FTS5 keyword JSON)
     Summarize {
-        /// 요약만 저장
+        /// Save summary only
         #[arg(long)]
         summary_only: bool,
 
-        /// FTS5 인덱스만 저장
+        /// Save FTS5 index only
         #[arg(long)]
         fts_only: bool,
     },
 
     /// Codex+Hermes: run manage + summarize in one go
     Pipeline {
-        /// Phase 1 건너뜀
+        /// Skip scan
         #[arg(long)]
         skip_scan: bool,
 
-        /// Phase 2 건너뜀
+        /// Skip archive
         #[arg(long)]
         skip_archive: bool,
 
-        /// Phase 3 건너뜀
+        /// Skip compact
         #[arg(long)]
         skip_compact: bool,
 
-        /// Phase 4 건너뜀
+        /// Skip summarize
         #[arg(long)]
         skip_summarize: bool,
 
-        /// 보존 일수
+        /// Retention days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 

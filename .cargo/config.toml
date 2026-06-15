@@ -1,0 +1,5 @@
+# 프로젝트 로컬 cargo 설정
+[alias]
+# cargo release: release 빌드 + ~/.local/bin/session-butler 설치
+# (cargo alias는 셸을 거치지 않아 ~ 확장이 안 되므로 절대경로 사용)
+release = ["install", "--path", ".", "--root", "/Users/kimjeongjin/.local", "--locked", "--force"]

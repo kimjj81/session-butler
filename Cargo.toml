@@ -46,6 +46,7 @@ tracing-subscriber = "0.3"
 
 # Text processing
 unicode-segmentation = "1.12"
+unicode-normalization = "0.1"
 
 # Progress bars
 indicatif = "0.17"

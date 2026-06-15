@@ -18,6 +18,7 @@ pub mod scanner;
 pub mod summary;
 pub mod tui;
 pub mod types;
+pub mod util;
 
 pub use error::{Error, Result};
 

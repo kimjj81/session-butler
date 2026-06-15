@@ -97,12 +97,13 @@ def archive(sessions: list[dict], dest: Path, dry_run: bool = False):
         else:
             dest_path = dest / src.name
 
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
         zst_path = Path(str(dest_path) + ".zst")
 
         if dry_run:
             skipped.append(s)
             continue
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Compress with zstd (level 3 for speed, good ratio)
         result = subprocess.run(

@@ -150,16 +150,17 @@ impl SessionArchiver {
                 dest.join(src.file_name().unwrap().to_string_lossy().as_ref())
             };
 
-            dest_path.parent().map(|p| fs::create_dir_all(p))
-                .transpose()
-                .map_err(|e| Error::Io(e))?;
-
             let zst_path = PathBuf::from(format!("{}.zst", dest_path.display()));
 
             if dry_run {
                 skipped.push((**session).clone());
                 continue;
             }
+
+            // 대상 디렉토리 생성 (dry-run이 아닐 때만)
+            dest_path.parent().map(|p| fs::create_dir_all(p))
+                .transpose()
+                .map_err(|e| Error::Io(e))?;
 
             // 압축 실행
             match self.compress_file(src, &zst_path) {

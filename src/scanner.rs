@@ -4,9 +4,10 @@ use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::types::CodexSessionMeta;
+use crate::util;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Codex 세션 스캐너
@@ -114,8 +115,8 @@ impl CodexScanner {
         let reader = BufReader::new(file);
 
         let mut meta = CodexSessionMeta {
-            path: path.to_path_buf(),
-            filename: filename.to_string(),
+            path: PathBuf::from(util::nfc(&path.to_string_lossy())),
+            filename: util::nfc(filename),
             session_id,
             date,
             cwd: None,
@@ -198,7 +199,7 @@ impl CodexScanner {
             match record_type {
                 Some("session_meta") => {
                     if let Some(payload) = record.get("payload") {
-                        meta.cwd = payload.get("cwd").and_then(|v| v.as_str()).map(String::from);
+                        meta.cwd = payload.get("cwd").and_then(|v| v.as_str()).map(|s| util::nfc(s));
                         meta.model_provider = payload.get("model_provider").and_then(|v| v.as_str()).map(String::from);
                         meta.cli_version = payload.get("cli_version").and_then(|v| v.as_str()).map(String::from);
                         meta.source = payload.get("source").and_then(|v| v.as_str()).map(String::from);

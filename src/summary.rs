@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::types::{Fts5Entry, Fts5Index, HermesSession, LargeContentItem, SummaryLayer};
+use crate::util;
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
@@ -159,11 +160,12 @@ impl SummaryBuilder {
                 .and_then(|s| s.as_str())
                 .unwrap_or(&session_id_value)
                 .to_string(),
-            source_file: path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string(),
-            path: path.to_path_buf(),
+            source_file: util::nfc(
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(""),
+            ),
+            path: PathBuf::from(util::nfc(&path.to_string_lossy())),
             model: session_data.get("model")
                 .and_then(|m| m.as_str())
                 .unwrap_or("")
@@ -248,12 +250,11 @@ impl SummaryBuilder {
         text.chars().take(limit).collect()
     }
 
-    /// 텍스트 정리
+    /// 텍스트 정리 — Python clean_text와 동일 (연속 공백을 단일 스페이스로 정리).
+    /// title/truncate에 token 기반 분할을 쓰면 1글자 한글·구두점이 사라지므로
+    /// Python 기준에 맞춰 공백 정리만 수행한다.
     fn clean_text(&self, text: &str) -> String {
-        let tokens: Vec<&str> = self.token_re.find_iter(text)
-            .map(|m| m.as_str())
-            .collect();
-        tokens.join(" ").trim().to_string()
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// 요약 추출

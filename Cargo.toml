@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Codex/Hermes session file management tool"
 authors = ["Kim Jeongjin"]
+license = "MIT"
 
 [dependencies]
 # TUI framework

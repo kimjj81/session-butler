@@ -278,7 +278,7 @@ impl TuiApp {
                     days: 0,
                     top: 15,
                     by: crate::insights::Granularity::Month,
-                    words: crate::insights::WordsSource::Full,
+                    words: crate::insights::WordsSource::All,
                     json: false,
                 },
                 args: vec![
@@ -305,9 +305,9 @@ impl TuiApp {
                     },
                     Arg {
                         name: "words".to_string(),
-                        description: "단어 분석 소스 (full/first-prompt)".to_string(),
-                        default_value: "full".to_string(),
-                        value: "full".to_string(),
+                        description: "단어 분석 소스 (all/conversation/reasoning/tools/first-prompt)".to_string(),
+                        default_value: "all".to_string(),
+                        value: "all".to_string(),
                         arg_type: ArgType::Text,
                     },
                     Arg {
@@ -662,8 +662,11 @@ impl TuiApp {
                     _ => crate::insights::Granularity::Month,
                 };
                 let words = match get_val("words").as_str() {
+                    "conversation" => crate::insights::WordsSource::Conversation,
+                    "reasoning" => crate::insights::WordsSource::Reasoning,
+                    "tools" => crate::insights::WordsSource::Tools,
                     "first-prompt" => crate::insights::WordsSource::FirstPrompt,
-                    _ => crate::insights::WordsSource::Full,
+                    _ => crate::insights::WordsSource::All,
                 };
                 let json = get_val("json") == "true";
                 Commands::Insights { days, top, by, words, json }

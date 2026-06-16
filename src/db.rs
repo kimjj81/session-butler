@@ -88,13 +88,14 @@ impl SessionDb {
             [],
         ).map_err(|e| Error::Sqlite(e))?;
 
-        // 대화 본문 단어 빈도 (insights --words full 집계용)
+        // 대화 본문 단어 빈도 — 카테고리(conversation/reasoning/tools)별 (insights --words용)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS session_words (
                 session_id TEXT NOT NULL,
+                category   TEXT NOT NULL,
                 word       TEXT NOT NULL,
                 count      INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (session_id, word)
+                PRIMARY KEY (session_id, category, word)
             )",
             [],
         ).map_err(|e| Error::Sqlite(e))?;
@@ -157,6 +158,26 @@ impl SessionDb {
                 [],
             ).map_err(|e| Error::Sqlite(e))?;
             self.conn.execute("PRAGMA user_version = 3", [])
+                .map_err(|e| Error::Sqlite(e))?;
+        }
+
+        if version < 4 {
+            // session_words 에 category 컬럼 추가 — 기존 스키마(category 없음)를 버리고
+            // 새 스키마로 재생성. session_words 는 v3에서 막 도입된 테이블이고 재스캔으로
+            // 백필되므로 drop해도 안전하다.
+            self.conn.execute("DROP TABLE IF EXISTS session_words", [])
+                .map_err(|e| Error::Sqlite(e))?;
+            self.conn.execute(
+                "CREATE TABLE session_words (
+                    session_id TEXT NOT NULL,
+                    category   TEXT NOT NULL,
+                    word       TEXT NOT NULL,
+                    count      INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (session_id, category, word)
+                )",
+                [],
+            ).map_err(|e| Error::Sqlite(e))?;
+            self.conn.execute("PRAGMA user_version = 4", [])
                 .map_err(|e| Error::Sqlite(e))?;
         }
 
@@ -282,24 +303,22 @@ impl SessionDb {
     }
 
     /// session_words 행 갱신: 기존 행 삭제 후 현재 분포 삽입.
-    /// 빈 map이면 삭제만 수행(이전에 기록된 단어가 사라진 경우 정합성 유지).
-    fn upsert_session_words(&self, session_id: &str, words: &HashMap<String, usize>) -> Result<()> {
+    /// words는 category → word → count. 빈 값이면 삭제만 수행(정합성 유지).
+    fn upsert_session_words(&self, session_id: &str, words: &HashMap<String, HashMap<String, usize>>) -> Result<()> {
         self.conn.execute(
             "DELETE FROM session_words WHERE session_id = ?1",
             params![session_id],
         ).map_err(|e| Error::Sqlite(e))?;
 
-        if words.is_empty() {
-            return Ok(());
-        }
-
         let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO session_words (session_id, word, count) VALUES (?1, ?2, ?3)"
+            "INSERT INTO session_words (session_id, category, word, count) VALUES (?1, ?2, ?3, ?4)"
         ).map_err(|e| Error::Sqlite(e))?;
 
-        for (word, count) in words {
-            stmt.execute(params![session_id, word, *count as i64])
-                .map_err(|e| Error::Sqlite(e))?;
+        for (category, counts) in words {
+            for (word, count) in counts {
+                stmt.execute(params![session_id, category, word, *count as i64])
+                    .map_err(|e| Error::Sqlite(e))?;
+            }
         }
 
         Ok(())
@@ -695,30 +714,31 @@ impl SessionDb {
         Ok(rows)
     }
 
-    /// 전체 대화 본문 단어 순위 (word, 총 빈도). 많이 쓴 순.
-    pub fn top_words_corpus(&self, days: u64, limit: i64) -> Result<Vec<(String, i64)>> {
+    /// 특정 카테고리 단어 순위 (word, 총 빈도). 많이 쓴 순.
+    pub fn top_words_category(&self, days: u64, category: &str, limit: i64) -> Result<Vec<(String, i64)>> {
         let cutoff = Self::cutoff_bound(days);
         let mut stmt = self.conn.prepare(
             "SELECT w.word, SUM(w.count) AS n \
              FROM session_words w JOIN sessions s ON s.session_id = w.session_id \
-             WHERE s.date >= ?1 AND w.count > 0 \
-             GROUP BY w.word ORDER BY n DESC, w.word LIMIT ?2"
+             WHERE s.date >= ?1 AND w.category = ?2 AND w.count > 0 \
+             GROUP BY w.word ORDER BY n DESC, w.word LIMIT ?3"
         ).map_err(|e| Error::Sqlite(e))?;
-        let rows = stmt.query_map(params![cutoff, limit], |r| Ok((r.get(0)?, r.get(1)?)))
+        let rows = stmt.query_map(params![cutoff, category, limit], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(|e| Error::Sqlite(e))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| Error::Sqlite(e))?;
         Ok(rows)
     }
 
-    /// 시간 버킷별 단어 집계용: (date, word, count)
-    pub fn words_with_dates(&self, days: u64) -> Result<Vec<(Option<String>, String, i64)>> {
+    /// 특정 카테고리 시간 버킷 집계용: (date, word, count)
+    pub fn words_with_dates_category(&self, days: u64, category: &str) -> Result<Vec<(Option<String>, String, i64)>> {
         let cutoff = Self::cutoff_bound(days);
         let mut stmt = self.conn.prepare(
             "SELECT s.date, w.word, w.count FROM session_words w \
-             JOIN sessions s ON s.session_id = w.session_id WHERE s.date >= ?1"
+             JOIN sessions s ON s.session_id = w.session_id \
+             WHERE s.date >= ?1 AND w.category = ?2"
         ).map_err(|e| Error::Sqlite(e))?;
-        let rows = stmt.query_map(params![cutoff], |r| {
+        let rows = stmt.query_map(params![cutoff, category], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         }).map_err(|e| Error::Sqlite(e))?
           .collect::<rusqlite::Result<Vec<_>>>()
@@ -901,9 +921,14 @@ mod tests {
         let db_path = dir.path().join("test.sqlite");
         let db = SessionDb::new(&db_path).unwrap();
 
+        let mut conv = HashMap::new();
+        conv.insert("login".to_string(), 3);
+        conv.insert("auth".to_string(), 5);
+        let mut reasoning = HashMap::new();
+        reasoning.insert("feasibility".to_string(), 2);
         let mut words = HashMap::new();
-        words.insert("login".to_string(), 3);
-        words.insert("auth".to_string(), 5);
+        words.insert("conversation".to_string(), conv);
+        words.insert("reasoning".to_string(), reasoning);
 
         let mut meta = CodexSessionMeta {
             path: PathBuf::from("/test/rollout-2026-01-01T12-00-00-uuid.jsonl"),
@@ -933,14 +958,21 @@ mod tests {
 
         db.upsert_session(&meta).unwrap();
 
-        // 많이 쓴 순 → auth(5)가 login(3)보다 선행
-        let top = db.top_words_corpus(0, 10).unwrap();
+        // conversation: 많이 쓴 순 → auth(5)가 login(3)보다 선행
+        let top = db.top_words_category(0, "conversation", 10).unwrap();
         assert_eq!(top.first().map(|(w, _)| w.as_str()), Some("auth"));
         assert_eq!(top.len(), 2);
+
+        // reasoning 카테고리는 별도 집계
+        let rtop = db.top_words_category(0, "reasoning", 10).unwrap();
+        assert_eq!(rtop.first().map(|(w, _)| w.as_str()), Some("feasibility"));
+
+        // tools 카테고리는 비어 있어야 함
+        assert!(db.top_words_category(0, "tools", 10).unwrap().is_empty());
 
         // 재 upsert(빈 map) 시 이전 session_words 행 제거
         meta.word_counts = HashMap::new();
         db.upsert_session(&meta).unwrap();
-        assert!(db.top_words_corpus(0, 10).unwrap().is_empty());
+        assert!(db.top_words_category(0, "conversation", 10).unwrap().is_empty());
     }
 }

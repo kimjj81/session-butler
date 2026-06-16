@@ -328,12 +328,18 @@ pub fn insights_section(id: &str) -> &'static str {
     }
 }
 
-/// 단어 섹션 헤더. 분석 소스(id: "full" | "first-prompt")에 따라 표시.
+/// 단어 섹션 헤더. 카테고리(conversation/reasoning/tools/first-prompt)에 따라 표시.
 pub fn insights_words_header(id: &str) -> &'static str {
     match (lang(), id) {
-        (Lang::Ko, "full") => "자주 쓴 단어 (전체 대화)",
-        (Lang::Ko, _) => "자주 쓴 단어 (첫 프롬프트)",
-        (Lang::En, "full") => "Top words (full conversation)",
-        (Lang::En, _) => "Top words (first prompt)",
+        (Lang::Ko, "conversation") => "자주 쓴 단어 (대화)",
+        (Lang::Ko, "reasoning") => "자주 쓴 단어 (추론)",
+        (Lang::Ko, "tools") => "자주 쓴 단어 (도구·출력)",
+        (Lang::Ko, "first-prompt") => "자주 쓴 단어 (첫 프롬프트)",
+        (Lang::Ko, _) => "자주 쓴 단어",
+        (Lang::En, "conversation") => "Top words (conversation)",
+        (Lang::En, "reasoning") => "Top words (reasoning)",
+        (Lang::En, "tools") => "Top words (tools/output)",
+        (Lang::En, "first-prompt") => "Top words (first prompt)",
+        (Lang::En, _) => "Top words",
     }
 }

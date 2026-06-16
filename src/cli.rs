@@ -149,8 +149,8 @@ pub enum Commands {
         #[arg(long, value_enum, default_value_t = crate::insights::Granularity::Month)]
         by: crate::insights::Granularity,
 
-        /// Word analysis source: full conversation body, or first prompt only
-        #[arg(long, value_enum, default_value_t = crate::insights::WordsSource::Full)]
+        /// Word analysis source: all categories, or one of conversation/reasoning/tools/first-prompt
+        #[arg(long, value_enum, default_value_t = crate::insights::WordsSource::All)]
         words: crate::insights::WordsSource,
 
         /// JSON output

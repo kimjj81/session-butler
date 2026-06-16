@@ -46,12 +46,21 @@ impl Granularity {
     }
 }
 
-/// 단어 분석 소스. clap ValueEnum 로 CLI `--words` 파싱.
+/// 단어 분석 소스/카테고리. clap ValueEnum 로 CLI `--words` 파싱.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
 pub enum WordsSource {
-    /// 전체 대화 본문(user/assistant 메시지)
-    #[value(name = "full")]
-    Full,
+    /// 3개 카테고리(conversation/reasoning/tools)를 각각 따로 표시
+    #[value(name = "all")]
+    All,
+    /// user/assistant 대화 메시지
+    #[value(name = "conversation")]
+    Conversation,
+    /// 모델 추론(agent_reasoning)
+    #[value(name = "reasoning")]
+    Reasoning,
+    /// 도구 호출 인자/입력 + 출력/결과/코드
+    #[value(name = "tools")]
+    Tools,
     /// 첫 사용자 프롬프트만
     #[value(name = "first-prompt")]
     FirstPrompt,
@@ -61,8 +70,22 @@ impl WordsSource {
     /// JSON/식별용 문자열.
     pub fn id(self) -> &'static str {
         match self {
-            WordsSource::Full => "full",
+            WordsSource::All => "all",
+            WordsSource::Conversation => "conversation",
+            WordsSource::Reasoning => "reasoning",
+            WordsSource::Tools => "tools",
             WordsSource::FirstPrompt => "first-prompt",
+        }
+    }
+
+    /// 시간 버킷(트렌드) 최빈단어를 가져올 카테고리.
+    /// first-prompt 는 별도(first_user_prompts) 경로 → None.
+    fn bucket_category(self) -> Option<&'static str> {
+        match self {
+            WordsSource::All | WordsSource::Conversation => Some("conversation"),
+            WordsSource::Reasoning => Some("reasoning"),
+            WordsSource::Tools => Some("tools"),
+            WordsSource::FirstPrompt => None,
         }
     }
 }
@@ -101,28 +124,18 @@ pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool, w
     let ids = db.session_ids_in_window(days)?;
     let leaders = db.top_sessions_by_tokens(days, 5)?;
 
-    // 단어 분석 소스 분기
-    // - Full: session_words(대화 본문) 테이블에서 직접 집계
-    // - FirstPrompt: first_user_prompt를 토큰화해 집계 (기존 동작)
+    // 단어 분석: 카테고리별 섹션. all → 3카테고리 각각, 단일 카테고리 → 1섹션,
+    // first-prompt → 첫 프롬프트 토큰화(기존 동작).
     let detail = db.session_detail_window(days)?;
     let tool_rows = db.tool_usage_with_dates(days)?;
-    let word_rows: Vec<(Option<String>, String, i64)> = match words {
-        WordsSource::Full => db.words_with_dates(days)?,
-        WordsSource::FirstPrompt => prompt_word_rows(&detail, &token_re),
+    let word_rows: Vec<(Option<String>, String, i64)> = match words.bucket_category() {
+        Some(cat) => db.words_with_dates_category(days, cat)?,
+        None => prompt_word_rows(&detail, &token_re),
     };
     let buckets = build_buckets(&detail, &tool_rows, &word_rows, by);
 
     let peak_hour = peak_hour_from_ids(&ids);
-    let top_words: Vec<(String, i64)> = match words {
-        WordsSource::Full => db.top_words_corpus(days, limit)?,
-        WordsSource::FirstPrompt => {
-            let prompts = db.first_user_prompts(days)?;
-            top_words(&prompts, &token_re, top)
-                .into_iter()
-                .map(|(w, c)| (w, c as i64))
-                .collect()
-        }
-    };
+    let word_sections = build_word_sections(&db, words, days, top, limit, &token_re)?;
 
     let report = Report {
         window_days: days,
@@ -147,7 +160,7 @@ pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool, w
             weekday: weekday_name(wd as usize), weekday_index: wd as i64, sessions: c,
         }).collect(),
         peak_hour,
-        top_words: top_words.into_iter().map(|(w, c)| WordStat { word: w, count: c }).collect(),
+        top_words: word_sections,
         token_leaders: leaders.into_iter().map(|(id, d, t, tc, p)| SessionStat {
             session_id: id, date: d, tokens: t, tool_calls: tc, prompt: p,
         }).collect(),
@@ -214,6 +227,52 @@ fn prompt_word_rows(
         }
     }
     out
+}
+
+/// 선택된 WordsSource에 따라 카테고리별 단어 섹션을 구성.
+/// All → conversation/reasoning/tools 3섹션, 단일 카테고리 → 1섹션,
+/// FirstPrompt → 첫 프롬프트 토큰화(기존 동작).
+fn build_word_sections(
+    db: &SessionDb,
+    words: WordsSource,
+    days: u64,
+    top: usize,
+    limit: i64,
+    token_re: &Regex,
+) -> Result<Vec<WordSection>> {
+    let to_stats = |rows: Vec<(String, i64)>| -> Vec<WordStat> {
+        rows.into_iter().map(|(w, c)| WordStat { word: w, count: c }).collect()
+    };
+    Ok(match words {
+        WordsSource::FirstPrompt => {
+            let prompts = db.first_user_prompts(days)?;
+            let ws = top_words(&prompts, token_re, top)
+                .into_iter()
+                .map(|(w, c)| WordStat { word: w, count: c as i64 })
+                .collect();
+            vec![WordSection { category: "first-prompt".to_string(), words: ws }]
+        }
+        WordsSource::All => {
+            let mut v = Vec::new();
+            for cat in crate::summary::WORD_CATEGORIES {
+                let ws = to_stats(db.top_words_category(days, cat, limit)?);
+                v.push(WordSection { category: cat.to_string(), words: ws });
+            }
+            v
+        }
+        WordsSource::Conversation | WordsSource::Reasoning | WordsSource::Tools => {
+            let cat = match words {
+                WordsSource::Conversation => "conversation",
+                WordsSource::Reasoning => "reasoning",
+                WordsSource::Tools => "tools",
+                _ => unreachable!(),
+            };
+            vec![WordSection {
+                category: cat.to_string(),
+                words: to_stats(db.top_words_category(days, cat, limit)?),
+            }]
+        }
+    })
 }
 
 /// first_user_prompt들을 토큰화해 상위 단어 추출 (불용어/숫자 제거).
@@ -409,19 +468,21 @@ fn render_text(r: &Report) {
         }
     }
 
-    // Top words
-    println!("\n■ {}", i18n::insights_words_header(r.words_source));
-    if r.top_words.is_empty() {
-        println!("  {}", i18n::insights_empty());
-    } else {
-        let mut line = String::from("  ");
-        for (i, w) in r.top_words.iter().enumerate() {
-            if i > 0 {
-                line.push_str("   ");
+    // Top words — 카테고리별 섹션 (conversation/reasoning/tools/first-prompt)
+    for section in &r.top_words {
+        println!("\n■ {}", i18n::insights_words_header(&section.category));
+        if section.words.is_empty() {
+            println!("  {}", i18n::insights_empty());
+        } else {
+            let mut line = String::from("  ");
+            for (i, w) in section.words.iter().enumerate() {
+                if i > 0 {
+                    line.push_str("   ");
+                }
+                line.push_str(&format!("{}({})", w.word, util::fmt_int(w.count)));
             }
-            line.push_str(&format!("{}({})", w.word, util::fmt_int(w.count)));
+            println!("{}", line);
         }
-        println!("{}", line);
     }
 
     // Token leaders
@@ -479,8 +540,14 @@ struct Report {
     time_buckets: Vec<TimeBucket>,
     activity_by_weekday: Vec<WeekdayStat>,
     peak_hour: Option<u32>,
-    top_words: Vec<WordStat>,
+    top_words: Vec<WordSection>,
     token_leaders: Vec<SessionStat>,
+}
+
+#[derive(Serialize)]
+struct WordSection {
+    category: String,
+    words: Vec<WordStat>,
 }
 
 #[derive(Serialize)]

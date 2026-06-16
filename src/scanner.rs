@@ -217,9 +217,8 @@ impl CodexScanner {
                             }
                         }
 
-                        // 대화 본문 단어 집계 (user/assistant 메시지 텍스트).
-                        // reasoning·도구 호출/결과·코드는 본문이 아니므로 제외하고,
-                        // 주입 컨텍스트(AGENTS.md 등)도 건너뛴다.
+                        // conversation 단어 집계 (user/assistant 메시지 텍스트).
+                        // 주입 컨텍스트(AGENTS.md 등)는 건너뛴다.
                         if item_type == Some("message") {
                             let role = payload.get("role").and_then(|v| v.as_str());
                             if matches!(role, Some("user") | Some("assistant")) {
@@ -233,12 +232,31 @@ impl CodexScanner {
                                 if !texts.is_empty() {
                                     let joined = texts.join("\n");
                                     if !looks_like_injected_context(&joined) {
-                                        for w in crate::summary::tokenize_words(&joined, token_re) {
-                                            *meta.word_counts.entry(w).or_insert(0) += 1;
-                                        }
+                                        add_words(&mut meta, "conversation", &joined, token_re);
                                     }
                                 }
                             }
+                        }
+
+                        // tools 단어 집계 (도구 호출 인자/입력 + 출력/결과/코드).
+                        // 노이즈가 크므로 별도 카테고리로 분리 저장.
+                        match item_type {
+                            Some("function_call") => {
+                                if let Some(args) = payload.get("arguments").and_then(|v| v.as_str()) {
+                                    add_words(&mut meta, "tools", &json_string_values(args), token_re);
+                                }
+                            }
+                            Some("custom_tool_call") => {
+                                if let Some(inp) = payload.get("input").and_then(|v| v.as_str()) {
+                                    add_words(&mut meta, "tools", inp, token_re);
+                                }
+                            }
+                            Some("function_call_output") | Some("custom_tool_call_output") => {
+                                if let Some(out) = payload.get("output").and_then(|v| v.as_str()) {
+                                    add_words(&mut meta, "tools", out, token_re);
+                                }
+                            }
+                            _ => {}
                         }
 
                         // 토큰 수 집계
@@ -264,6 +282,11 @@ impl CodexScanner {
                             }
                         } else if event_type == Some("patch_apply_end") {
                             meta.file_change_count += 1;
+                        } else if event_type == Some("agent_reasoning") {
+                            // reasoning 단어 집계 (모델 추론 요약 text).
+                            if let Some(t) = payload.get("text").and_then(|v| v.as_str()) {
+                                add_words(&mut meta, "reasoning", t, token_re);
+                            }
                         } else if event_type == Some("token_count") {
                             // payload.info.total_token_usage.total_tokens 는
                             // 세션 누적 토큰(이벤트가 주기적 스냅샷으로 여러 번 발생).
@@ -364,6 +387,32 @@ impl CodexScanner {
     }
 }
 
+/// 세션 메타의 word_counts[category][word]에 텍스트를 토큰화해 누적.
+fn add_words(meta: &mut CodexSessionMeta, category: &str, text: &str, token_re: &Regex) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let map = meta.word_counts.entry(category.to_string()).or_default();
+    for w in crate::summary::tokenize_words(text, token_re) {
+        *map.entry(w).or_insert(0) += 1;
+    }
+}
+
+/// JSON 문자열(예: function_call.arguments)에서 문자열 값만 결합해 반환.
+/// 키(cmd/workdir/call_id 등)가 단어 통계를 오염시키지 않게 한다.
+/// 파싱 실패 시 빈 문자열.
+fn json_string_values(s: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(serde_json::Value::Object(map)) => map
+            .values()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Ok(serde_json::Value::String(s)) => s,
+        _ => String::new(),
+    }
+}
+
 /// 주입 컨텍스트(AGENTS.md, 시스템 지시문 등) 휴리스틱 감지.
 /// first_user_prompt 노이즈 제거용 — 진짜 사용자 프롬프트를 찾을 때까지 건너뛴다.
 fn looks_like_injected_context(text: &str) -> bool {
@@ -404,6 +453,9 @@ mod tests {
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the login bug in auth.rs"}]}}
 {"type":"response_item","payload":{"type":"function_call","name":"exec_command"}}
 {"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch"}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"grep login auth.rs\",\"workdir\":\"/test\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"auth.rs:42 login validated"}}
+{"type":"event_msg","payload":{"type":"agent_reasoning","text":"analyzing the login flow carefully"}}
 {"type":"event_msg","payload":{"type":"task_started","model_context_window":"gpt-4"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"input_tokens":600,"output_tokens":150,"total_tokens":750}}}}
 "##;
@@ -417,19 +469,34 @@ mod tests {
 
         assert_eq!(meta.cwd, Some("/test".to_string()));
         assert_eq!(meta.model_provider, Some("test-provider".to_string()));
-        assert_eq!(meta.tool_call_count, 2);
+        assert_eq!(meta.tool_call_count, 3);
         // 주입 컨텍스트를 건너뛰고 진짜 프롬프트 추출
         assert_eq!(meta.first_user_prompt.as_deref(), Some("Fix the login bug in auth.rs"));
         // tool 이름 집계
-        assert_eq!(meta.tool_usage.get("exec_command"), Some(&1));
+        assert_eq!(meta.tool_usage.get("exec_command"), Some(&2));
         assert_eq!(meta.tool_usage.get("apply_patch"), Some(&1));
         assert_eq!(meta.has_user_event, true);
         assert_eq!(meta.total_tokens, 1500);
-        // 대화 본문 단어 집계: "Fix the login bug in auth.rs" (the/in 은 불용어)
-        assert_eq!(meta.word_counts.get("fix"), Some(&1));
-        assert_eq!(meta.word_counts.get("login"), Some(&1));
-        assert_eq!(meta.word_counts.get("bug"), Some(&1));
-        // AGENTS.md 주입 컨텍스트는 단어 집계에서도 제외
-        assert!(meta.word_counts.get("agents.md").is_none());
+
+        // conversation: "Fix the login bug in auth.rs" (the/in 은 불용어)
+        let conv = meta.word_counts.get("conversation").expect("conversation category");
+        assert_eq!(conv.get("fix"), Some(&1));
+        assert_eq!(conv.get("login"), Some(&1));
+        assert_eq!(conv.get("bug"), Some(&1));
+        assert!(conv.get("agents.md").is_none());
+
+        // reasoning: agent_reasoning "analyzing the login flow carefully"
+        let reas = meta.word_counts.get("reasoning").expect("reasoning category");
+        assert_eq!(reas.get("analyzing"), Some(&1));
+        assert_eq!(reas.get("login"), Some(&1));
+        assert_eq!(reas.get("flow"), Some(&1));
+
+        // tools: function_call arguments(문자열 값만) + function_call_output
+        //   args "grep login auth.rs" + output "auth.rs:42 login validated"
+        let tools = meta.word_counts.get("tools").expect("tools category");
+        assert_eq!(tools.get("grep"), Some(&1));
+        assert_eq!(tools.get("login"), Some(&2)); // args + output
+        assert!(tools.get("cmd").is_none()); // JSON 키는 제외됨
+        assert!(tools.get("validated").is_some());
     }
 }

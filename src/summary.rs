@@ -20,6 +20,10 @@ pub(crate) const STOP_WORDS: &[&str] = &[
     "with", "write", "you", "your",
 ];
 
+/// 단어 빈도 분석 카테고리 (session_words.category 값).
+/// conversation = user/assistant 메시지, reasoning = 모델 추론, tools = 도구 호출/출력/코드.
+pub(crate) const WORD_CATEGORIES: &[&str] = &["conversation", "reasoning", "tools"];
+
 /// 단어 빈도 분석용 정규화 토크나이저.
 /// `insights` 단어 분석과 `scanner`의 대화 본문 집계가 공유한다.
 /// token_re 매치 → 앞뒤 구분자(._-/) 제거 → ASCII면 소문자화 →

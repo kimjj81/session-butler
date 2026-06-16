@@ -31,6 +31,8 @@ pub struct CodexSessionMeta {
     pub indexed_at: Option<DateTime<Utc>>,
     /// tool/skill 이름별 호출 수 (function_call/custom_tool_call의 name 집계)
     pub tool_usage: HashMap<String, usize>,
+    /// 대화 본문(user/assistant 메시지) 단어별 빈도 (insights --words full용)
+    pub word_counts: HashMap<String, usize>,
 }
 
 /// JSONL 레코드 타입 (Codex)

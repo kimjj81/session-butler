@@ -88,6 +88,17 @@ impl SessionDb {
             [],
         ).map_err(|e| Error::Sqlite(e))?;
 
+        // 대화 본문 단어 빈도 (insights --words full 집계용)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_words (
+                session_id TEXT NOT NULL,
+                word       TEXT NOT NULL,
+                count      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, word)
+            )",
+            [],
+        ).map_err(|e| Error::Sqlite(e))?;
+
         self.migrate()?;
 
         Ok(())
@@ -131,6 +142,21 @@ impl SessionDb {
                 [],
             ).map_err(|e| Error::Sqlite(e))?;
             self.conn.execute("PRAGMA user_version = 2", [])
+                .map_err(|e| Error::Sqlite(e))?;
+        }
+
+        if version < 3 {
+            // session_words 테이블 (대화 본문 단어 빈도). init_tables에서도 생성하지만 구버전 DB 호환용.
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS session_words (
+                    session_id TEXT NOT NULL,
+                    word       TEXT NOT NULL,
+                    count      INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (session_id, word)
+                )",
+                [],
+            ).map_err(|e| Error::Sqlite(e))?;
+            self.conn.execute("PRAGMA user_version = 3", [])
                 .map_err(|e| Error::Sqlite(e))?;
         }
 
@@ -225,6 +251,9 @@ impl SessionDb {
         // tool_usage 갱신 (기존 행 삭제 후 재삽입 — 재인덱싱 시 중복 방지)
         self.upsert_tool_usage(&meta.session_id, &meta.tool_usage)?;
 
+        // session_words 갱신 (기존 행 삭제 후 재삽입 — 재인덱싱 시 중복 방지)
+        self.upsert_session_words(&meta.session_id, &meta.word_counts)?;
+
         Ok(())
     }
 
@@ -246,6 +275,30 @@ impl SessionDb {
 
         for (tool_name, count) in usage {
             stmt.execute(params![session_id, tool_name, *count as i64])
+                .map_err(|e| Error::Sqlite(e))?;
+        }
+
+        Ok(())
+    }
+
+    /// session_words 행 갱신: 기존 행 삭제 후 현재 분포 삽입.
+    /// 빈 map이면 삭제만 수행(이전에 기록된 단어가 사라진 경우 정합성 유지).
+    fn upsert_session_words(&self, session_id: &str, words: &HashMap<String, usize>) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM session_words WHERE session_id = ?1",
+            params![session_id],
+        ).map_err(|e| Error::Sqlite(e))?;
+
+        if words.is_empty() {
+            return Ok(());
+        }
+
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO session_words (session_id, word, count) VALUES (?1, ?2, ?3)"
+        ).map_err(|e| Error::Sqlite(e))?;
+
+        for (word, count) in words {
+            stmt.execute(params![session_id, word, *count as i64])
                 .map_err(|e| Error::Sqlite(e))?;
         }
 
@@ -642,6 +695,37 @@ impl SessionDb {
         Ok(rows)
     }
 
+    /// 전체 대화 본문 단어 순위 (word, 총 빈도). 많이 쓴 순.
+    pub fn top_words_corpus(&self, days: u64, limit: i64) -> Result<Vec<(String, i64)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT w.word, SUM(w.count) AS n \
+             FROM session_words w JOIN sessions s ON s.session_id = w.session_id \
+             WHERE s.date >= ?1 AND w.count > 0 \
+             GROUP BY w.word ORDER BY n DESC, w.word LIMIT ?2"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff, limit], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| Error::Sqlite(e))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 시간 버킷별 단어 집계용: (date, word, count)
+    pub fn words_with_dates(&self, days: u64) -> Result<Vec<(Option<String>, String, i64)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT s.date, w.word, w.count FROM session_words w \
+             JOIN sessions s ON s.session_id = w.session_id WHERE s.date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        }).map_err(|e| Error::Sqlite(e))?
+          .collect::<rusqlite::Result<Vec<_>>>()
+          .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
     /// 시간 버킷 집계용 세션 상세: (date, session_id, total_tokens, first_user_prompt)
     pub fn session_detail_window(
         &self,
@@ -745,6 +829,7 @@ mod tests {
             size_bytes: 0,
             indexed_at: Some(Utc::now()),
             tool_usage: HashMap::new(),
+            word_counts: HashMap::new(),
         };
 
         db.upsert_session(&meta).unwrap();
@@ -784,6 +869,7 @@ mod tests {
             size_bytes: 0,
             indexed_at: Some(Utc::now()),
             tool_usage: tools.clone(),
+            word_counts: HashMap::new(),
         };
 
         db.upsert_session(&meta).unwrap();
@@ -807,5 +893,54 @@ mod tests {
         db.upsert_session(&meta).unwrap();
         assert_eq!(db.distinct_tools(0).unwrap(), 2);
         assert_eq!(db.distinct_projects(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_session_words_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let db = SessionDb::new(&db_path).unwrap();
+
+        let mut words = HashMap::new();
+        words.insert("login".to_string(), 3);
+        words.insert("auth".to_string(), 5);
+
+        let mut meta = CodexSessionMeta {
+            path: PathBuf::from("/test/rollout-2026-01-01T12-00-00-uuid.jsonl"),
+            filename: "rollout-2026-01-01T12-00-00-uuid.jsonl".to_string(),
+            session_id: "2026-01-01T12-00-00-uuid".to_string(),
+            date: Some("2026-01-01".to_string()),
+            cwd: Some("/test".to_string()),
+            first_user_prompt: Some("test prompt".to_string()),
+            model_provider: Some("openai".to_string()),
+            cli_version: Some("1.0.0".to_string()),
+            source: Some("test".to_string()),
+            model: Some("gpt-4".to_string()),
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
+            tool_call_count: 0,
+            file_change_count: 0,
+            total_tokens: 0,
+            line_count: 0,
+            corrupt_lines: 0,
+            has_user_event: true,
+            size_bytes: 0,
+            indexed_at: Some(Utc::now()),
+            tool_usage: HashMap::new(),
+            word_counts: words,
+        };
+
+        db.upsert_session(&meta).unwrap();
+
+        // 많이 쓴 순 → auth(5)가 login(3)보다 선행
+        let top = db.top_words_corpus(0, 10).unwrap();
+        assert_eq!(top.first().map(|(w, _)| w.as_str()), Some("auth"));
+        assert_eq!(top.len(), 2);
+
+        // 재 upsert(빈 map) 시 이전 session_words 행 제거
+        meta.word_counts = HashMap::new();
+        db.upsert_session(&meta).unwrap();
+        assert!(db.top_words_corpus(0, 10).unwrap().is_empty());
     }
 }

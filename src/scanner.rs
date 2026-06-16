@@ -6,10 +6,14 @@ use crate::error::{Error, Result};
 use crate::i18n;
 use crate::types::CodexSessionMeta;
 use crate::util;
+use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// 단어 빈도 분석용 토큰 정규식 (summary::tokenize_words와 쌍).
+const TOKEN_RE: &str = r"[A-Za-z0-9_가-힣./-]{2,}";
 
 /// Codex 세션 스캐너
 pub struct CodexScanner {
@@ -65,11 +69,15 @@ impl CodexScanner {
         let visible = self.progress && std::io::IsTerminal::is_terminal(&std::io::stderr());
         let pb = crate::progress::bar_if(total_files as u64, &i18n::scan_progress_label(), self.progress);
 
+        // 단어 토크나이저(대화 본문 집계용) — 파일마다 재컴파일하지 않도록 1회 컴파일.
+        let token_re = Regex::new(TOKEN_RE)
+            .map_err(|e| Error::Other(format!("token regex: {}", e)))?;
+
         // 추출
         let mut results = Vec::new();
         for path in files.iter() {
             pb.inc(1);
-            match self.extract_session_meta(path) {
+            match self.extract_session_meta(path, &token_re) {
                 Ok(meta) => results.push(meta),
                 Err(e) => {
                     let msg = format!("  ERROR processing {}: {}", path.display(), e);
@@ -91,7 +99,7 @@ impl CodexScanner {
     }
 
     /// 단일 세션 메타데이터 추출 (스트리밍)
-    fn extract_session_meta(&self, path: &Path) -> Result<CodexSessionMeta> {
+    fn extract_session_meta(&self, path: &Path, token_re: &Regex) -> Result<CodexSessionMeta> {
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| Error::InvalidPath(path.to_path_buf()))?;
@@ -127,6 +135,7 @@ impl CodexScanner {
             size_bytes,
             indexed_at: None,
             tool_usage: std::collections::HashMap::new(),
+            word_counts: std::collections::HashMap::new(),
         };
 
         let mut found_first_prompt = false;
@@ -205,6 +214,30 @@ impl CodexScanner {
                             // tool/skill 이름 집계 (있다면)
                             if let Some(name) = payload.get("name").and_then(|v| v.as_str()) {
                                 *meta.tool_usage.entry(name.to_string()).or_insert(0) += 1;
+                            }
+                        }
+
+                        // 대화 본문 단어 집계 (user/assistant 메시지 텍스트).
+                        // reasoning·도구 호출/결과·코드는 본문이 아니므로 제외하고,
+                        // 주입 컨텍스트(AGENTS.md 등)도 건너뛴다.
+                        if item_type == Some("message") {
+                            let role = payload.get("role").and_then(|v| v.as_str());
+                            if matches!(role, Some("user") | Some("assistant")) {
+                                let texts: Vec<String> = payload
+                                    .get("content")
+                                    .and_then(|c| c.as_array())
+                                    .map(|arr| arr.iter()
+                                        .filter_map(|item| item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                                        .collect())
+                                    .unwrap_or_default();
+                                if !texts.is_empty() {
+                                    let joined = texts.join("\n");
+                                    if !looks_like_injected_context(&joined) {
+                                        for w in crate::summary::tokenize_words(&joined, token_re) {
+                                            *meta.word_counts.entry(w).or_insert(0) += 1;
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -379,7 +412,8 @@ mod tests {
 
         let config = Config::default();
         let scanner = CodexScanner::new(config);
-        let meta = scanner.extract_session_meta(&test_file).unwrap();
+        let token_re = Regex::new(TOKEN_RE).unwrap();
+        let meta = scanner.extract_session_meta(&test_file, &token_re).unwrap();
 
         assert_eq!(meta.cwd, Some("/test".to_string()));
         assert_eq!(meta.model_provider, Some("test-provider".to_string()));
@@ -391,5 +425,11 @@ mod tests {
         assert_eq!(meta.tool_usage.get("apply_patch"), Some(&1));
         assert_eq!(meta.has_user_event, true);
         assert_eq!(meta.total_tokens, 1500);
+        // 대화 본문 단어 집계: "Fix the login bug in auth.rs" (the/in 은 불용어)
+        assert_eq!(meta.word_counts.get("fix"), Some(&1));
+        assert_eq!(meta.word_counts.get("login"), Some(&1));
+        assert_eq!(meta.word_counts.get("bug"), Some(&1));
+        // AGENTS.md 주입 컨텍스트는 단어 집계에서도 제외
+        assert!(meta.word_counts.get("agents.md").is_none());
     }
 }

@@ -11,15 +11,15 @@ use crate::summary::SummaryBuilder;
 use crate::types::{Backend, SessionInfo};
 use clap::{Parser, Subcommand};
 
-/// Session Butler - Codex/Hermes 세션 파일 관리 도구
+/// Session Butler - 세션 로그 관리 도구
 #[derive(Parser, Debug)]
 #[command(name = "session-butler")]
 #[command(author = "Kim Jeongjin")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(
-    about = "Compress, archive, and summarize Codex/Hermes session logs",
+    about = "Compress, archive, and summarize session logs",
     long_about = "Manages Codex sessions (rollout-*.jsonl) via scan/archive/restore/compact, \
-and summarizes Hermes sessions (session_*.json) into a searchable knowledge base.\n\
+and summarizes session logs (session_*.json) into a searchable knowledge base.\n\
 Backend activation precedence: config file → env (CODEX_ENABLED/HERMES_ENABLED) → \
 --no-codex/--no-hermes"
 )]
@@ -32,7 +32,7 @@ pub struct Cli {
     #[arg(short = 'C', long, global = true)]
     pub codex_sessions: Option<String>,
 
-    /// Hermes sessions directory
+    /// Session-summary backend directory (session_*.json)
     #[arg(short = 'H', long, global = true)]
     pub hermes_sessions: Option<String>,
 
@@ -60,7 +60,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_codex: bool,
 
-    /// Disable Hermes backend (skips summarize)
+    /// Disable the session-summary backend (skips summarize)
     #[arg(long, global = true)]
     pub no_hermes: bool,
 }
@@ -149,6 +149,10 @@ pub enum Commands {
         #[arg(long, value_enum, default_value_t = crate::insights::Granularity::Month)]
         by: crate::insights::Granularity,
 
+        /// Word analysis source: full conversation body, or first prompt only
+        #[arg(long, value_enum, default_value_t = crate::insights::WordsSource::Full)]
+        words: crate::insights::WordsSource,
+
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -169,7 +173,7 @@ pub enum Commands {
         scan_sensitive: bool,
     },
 
-    /// Hermes: summarize sessions (summary + FTS5 keyword JSON)
+    /// Summarize sessions (summary + FTS5 keyword JSON)
     Summarize {
         /// Save summary only
         #[arg(long)]
@@ -180,7 +184,7 @@ pub enum Commands {
         fts_only: bool,
     },
 
-    /// Codex+Hermes: run manage + summarize in one go
+    /// Run manage + summarize in one go
     Pipeline {
         /// Skip scan
         #[arg(long)]
@@ -309,11 +313,11 @@ pub fn run(cli: Cli) -> Result<()> {
             archiver.show_stats(&sessions)?;
         }
 
-        Commands::Insights { days, top, by, json } => {
+        Commands::Insights { days, top, by, words, json } => {
             if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
-            crate::insights::run(config, days, top, by, json)?;
+            crate::insights::run(config, days, top, by, json, words)?;
         }
 
         Commands::Compact { days, dry_run, scan_sensitive } => {
@@ -394,7 +398,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
 
             if !skip_summarize {
-                println!("Summarizing Hermes sessions...");
+                println!("Summarizing sessions...");
                 let builder = SummaryBuilder::new(config)?;
                 builder.run_pipeline()?;
                 println!("Summarize complete.\n");

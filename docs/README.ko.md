@@ -2,17 +2,17 @@
 
 > 🌐 언어: [English](../README.md) · **한국어**
 
-**Codex** / **Hermes** 세션 기록을 압축·보관하고, 검색 가능한 지식베이스로 만들어주는 도구.
+세션 기록을 압축·보관하고, 검색 가능한 지식베이스로 만들어주는 도구.
 
 - **Codex** 세션 → 스캔/인덱싱, 압축/보관(+복원), 컴팩션 및 민감정보 탐지.
-- **Hermes** 세션 → 요약 + 키워드 검색 레이어 생성.
-- 사용하는 백엔드만 선택해 활성화(Codex만 / Hermes만 / 둘 다).
+- **요약 백엔드**(`session_*.json`) → 요약 + 키워드 검색 레이어 생성.
+- 사용하는 백엔드만 선택해 활성화(Codex만 / 요약 백엔드만 / 둘 다).
 
 ---
 
 ## 왜 만들었는가
 
-**Codex**와 **Hermes**는 대화 내용을 JSONL/JSON으로 홈 디렉토리 밑에 조용히 저장한다. 매일 쓰다 보면 몇 달 만에 파일이 불어나는데, 제 경우 `~/.codex/sessions/`는 **3 GB**를 넘겼다.
+**Codex** 같은 AI 코딩 에이전트는 대화 내용을 JSONL/JSON으로 홈 디렉토리 밑에 조용히 저장한다. 매일 쓰다 보면 몇 달 만에 파일이 불어나는데, 제 경우 `~/.codex/sessions/`는 **3 GB**를 넘겼다.
 
 이 기록은 분명 귀중하다. 몇 달 치의 디버깅 노트, 설계 결정, 공들여 다듬은 프롬프트가 고스란히 들어있다. 하지만 3 GB짜리 파일은 디스크에 둔 채로는 너무 무겁고, raw 그대로 뒤지기엔 고통스럽고, 그렇다고 지우기엔 아깝다. 결국 자리만 차지하고 아무 쓸모가 없는 **죽은 무게**가 되어 있었다.
 
@@ -20,7 +20,7 @@
 
 ## 어떤 일을 하나
 
-이 도구는 **Codex** 세션 로그를 관리하고, **Hermes** 세션 로그를 요약합니다. 각 명령은 한쪽 백엔드를 대상으로 하며, 설정에서 백엔드별 활성화를 제어합니다(아래 설정 참고).
+이 도구는 **Codex** 세션 로그를 관리하고, `session_*.json` 로그(**요약 백엔드**)를 요약합니다. 각 명령은 한쪽 백엔드를 대상으로 하며, 설정에서 백엔드별 활성화를 제어합니다(아래 설정 참고).
 
 ### Codex — 세션 로그 관리
 
@@ -37,13 +37,13 @@
 
 > **`--days`의 범위:** `scan`은 항상 **모든** 세션을 색인합니다(`--days` 없음). `--days`는 다른 명령의 대상만 좁힙니다 — `archive`/`compact`/`pipeline`에서는 **보존 기간**(최근 N일은 두고 그 이전에 작업), `list`/`stats`/`insights`에서는 **조회 기간**(최근 N일, `insights`는 `0` = 전체).
 
-### Hermes — 세션 로그 요약
+### 요약 백엔드 — 세션 로그 요약
 
 | 명령 | 하는 일 |
 |------|---------|
-| `summarize` | Hermes `session_*.json` 분석 → 요약 + FTS5 키워드 JSON |
+| `summarize` | `session_*.json` 분석 → 요약 + FTS5 키워드 JSON |
 
-참고: Hermes는 여러 종류의 파일(`session_*.json`, `request_dump_*.json` 등)을 기록합니다. 실제 대화 로그인 `session_*.json`만 요약하며, 요청/에러 덤프는 건너뜁니다.
+참고: 이 백엔드는 여러 종류의 파일(`session_*.json`, `request_dump_*.json` 등)을 기록합니다. 실제 대화 로그인 `session_*.json`만 요약하며, 요청/에러 덤프는 건너뜁니다.
 
 ## 빌드
 
@@ -92,7 +92,7 @@ session-butler stats  --days 30
 session-butler insights [--days 0] [--top 15] [--by month]   # 0 = 전체
 session-butler compact --scan-sensitive        # 민감정보 스캔만
 
-# Hermes — 요약
+# 요약
 session-butler summarize                       # 요약 + FTS5 JSON
 session-butler summarize --summary-only
 session-butler summarize --fts-only
@@ -105,7 +105,7 @@ session-butler pipeline --days 30 --dry-run
 
 ### 백엔드 활성화
 
-Codex와 Hermes 각각 활성화/비활성화할 수 있습니다. 우선순위(높은 것이 이김):
+Codex와 요약 백엔드 각각 활성화/비활성화할 수 있습니다. 우선순위(높은 것이 이김):
 
 1. CLI 플래그: `--no-codex`, `--no-hermes`
 2. 환경변수: `CODEX_ENABLED`, `HERMES_ENABLED`(`0`/`false`/`off`/`no` → 비활성)
@@ -141,7 +141,7 @@ Codex와 Hermes 각각 활성화/비활성화할 수 있습니다. 우선순위(
 | 대상 | 파일 수 | 원본 크기 | 결과 |
 |------|--------:|---------:|-------|
 | Codex 세션 | 3,037 | 3.1 GB | 압축 대상(2,303개) **2.42 GB → 0.86 GB** (약 64% 축소) |
-| Hermes 세션 | 82 (그중 `session_*.json` 52개) | 47 MB | 52개 세션 요약 → `summary_layer.json` + `fts5_index.json` |
+| 요약 백엔드 세션 | 82 (그중 `session_*.json` 52개) | 47 MB | 52개 세션 요약 → `summary_layer.json` + `fts5_index.json` |
 
 즉, **2.4 GB짜리 과거 Codex 세션이 약 860 MB로 줄었고**, SQLite + FTS5 인덱스로 전문검색도 그대로 가능하다. `archive --move`로 원본을 지우면 그만큼 디스크를 추가로 확보할 수 있다.
 

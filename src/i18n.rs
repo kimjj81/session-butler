@@ -221,7 +221,7 @@ pub fn tui_desc(id: &str) -> &'static str {
         (Lang::Ko, "list") => "세션 목록 표시",
         (Lang::Ko, "stats") => "세션 통계 표시",
         (Lang::Ko, "compact") => "세션 compaction 및 민감정보 탐지",
-        (Lang::Ko, "summarize") => "Hermes 세션 요약 및 FTS5 인덱스",
+        (Lang::Ko, "summarize") => "세션 요약 및 FTS5 인덱스",
         (Lang::Ko, "insights") => "사용 인사이트 (tool/프로젝트/추세/단어)",
         (Lang::Ko, "pipeline") => "전체 파이프라인 실행",
         (Lang::En, "scan") => "Scan Codex sessions & index to SQLite",
@@ -230,7 +230,7 @@ pub fn tui_desc(id: &str) -> &'static str {
         (Lang::En, "list") => "List sessions",
         (Lang::En, "stats") => "Session statistics",
         (Lang::En, "compact") => "Compaction + sensitive-info scan",
-        (Lang::En, "summarize") => "Summarize Hermes sessions + FTS5",
+        (Lang::En, "summarize") => "Summarize sessions + FTS5",
         (Lang::En, "insights") => "Usage insights (tools/projects/trends/words)",
         (Lang::En, "pipeline") => "Run the full pipeline",
         _ => "",
@@ -325,5 +325,15 @@ pub fn insights_section(id: &str) -> &'static str {
         (Lang::En, "top_skill") => "Top skill",
         (Lang::En, "top_words") => "Top words",
         _ => "",
+    }
+}
+
+/// 단어 섹션 헤더. 분석 소스(id: "full" | "first-prompt")에 따라 표시.
+pub fn insights_words_header(id: &str) -> &'static str {
+    match (lang(), id) {
+        (Lang::Ko, "full") => "자주 쓴 단어 (전체 대화)",
+        (Lang::Ko, _) => "자주 쓴 단어 (첫 프롬프트)",
+        (Lang::En, "full") => "Top words (full conversation)",
+        (Lang::En, _) => "Top words (first prompt)",
     }
 }

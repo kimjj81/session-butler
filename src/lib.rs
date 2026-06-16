@@ -1,4 +1,4 @@
-//! Session Butler - Codex/Hermes 세션 파일 관리 도구
+//! Session Butler - 세션 로그 관리 도구
 //!
 //! 4단계 파이프라인:
 //! - Phase 1: Codex 세션 스캔 및 SQLite 인덱싱

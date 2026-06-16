@@ -1,4 +1,4 @@
-//! Session Butler - Codex/Hermes 세션 파일 관리 도구
+//! Session Butler - 세션 로그 관리 도구
 //!
 //! TUI 및 CLI 인터페이스 제공
 

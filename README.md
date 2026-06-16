@@ -2,17 +2,17 @@
 
 > 🌐 Languages: **English** · [한국어](./docs/README.ko.md)
 
-Compress, archive, and turn your **Codex** / **Hermes** session logs into a searchable knowledge base.
+Compress, archive, and turn your session logs into a searchable knowledge base.
 
 - **Codex** sessions → scan/index, compress/archive (+ restore), compact & secret-screen.
-- **Hermes** sessions → summarize into a queryable summary + keyword layer.
-- Enable only the backend you use (Codex, Hermes, or both).
+- The **summary backend** (`session_*.json`) → summarize into a queryable summary + keyword layer.
+- Enable only the backends you use (Codex and/or the summary backend).
 
 ---
 
 ## Why I built this
 
-Tools like **Codex** and **Hermes** silently record every conversation as JSONL/JSON under your home directory. Use them daily for a few months and those files pile up — my own `~/.codex/sessions/` had grown past **3 GB**.
+AI coding agents like **Codex** silently record every conversation as JSONL/JSON under your home directory. Use them daily for a few months and those files pile up — my own `~/.codex/sessions/` had grown past **3 GB**.
 
 That history is genuinely valuable: months of debugging notes, design decisions, and hard-won prompts. But at 3 GB it was too bulky to leave on disk, too painful to scroll through raw, and too precious to delete. It was dead weight — taking up space yet doing nothing for me.
 
@@ -20,7 +20,7 @@ That history is genuinely valuable: months of debugging notes, design decisions,
 
 ## What it does
 
-The tool manages **Codex** session logs and summarizes **Hermes** session logs. Each command targets one backend; enable/disable backends via settings (see below).
+The tool manages **Codex** session logs and summarizes `session_*.json` logs (the **summary backend**). Each command targets one backend; enable/disable backends via settings (see below).
 
 ### Codex — manage session logs
 
@@ -37,13 +37,13 @@ Archive state and SHA-256 checksums are stored in the **SQLite index**, so `rest
 
 > **Scope of `--days`:** `scan` always indexes **every** session (it takes no `--days`). The `--days` flag only narrows the *other* commands — a **retention window** for `archive`/`compact`/`pipeline` (keep the recent N days, act on the older ones) and a **look-back window** for `list`/`stats`/`insights` (last N days; `0` = all time on `insights`).
 
-### Hermes — summarize session logs
+### Summary backend — summarize session logs
 
 | Command | What it does |
 |---------|--------------|
-| `summarize` | Analyze Hermes `session_*.json` → summary + FTS5 keyword JSON |
+| `summarize` | Analyze `session_*.json` → summary + FTS5 keyword JSON |
 
-Note: Hermes writes several file types (`session_*.json`, `request_dump_*.json`, …). Only `session_*.json` (the actual conversation logs) are summarized; request/error dumps are skipped.
+Note: this backend writes several file types (`session_*.json`, `request_dump_*.json`, …). Only `session_*.json` (the actual conversation logs) are summarized; request/error dumps are skipped.
 
 ## Build
 
@@ -92,7 +92,7 @@ session-butler stats  --days 30
 session-butler insights [--days 0] [--top 15] [--by month]   # 0 = all time
 session-butler compact --scan-sensitive        # scan for secrets only
 
-# Hermes — summarize
+# Summarize
 session-butler summarize                       # summary + FTS5 JSON
 session-butler summarize --summary-only
 session-butler summarize --fts-only
@@ -105,7 +105,7 @@ session-butler pipeline --days 30 --dry-run
 
 ### Backend enable/disable
 
-Codex and Hermes can each be enabled or disabled. Precedence (highest wins):
+Codex and the summary backend can each be enabled or disabled. Precedence (highest wins):
 
 1. CLI flags: `--no-codex`, `--no-hermes`
 2. Environment variables: `CODEX_ENABLED`, `HERMES_ENABLED` (`0`/`false`/`off`/`no` → disabled)
@@ -141,7 +141,7 @@ Measured on my own session history:
 | Target | Files | Raw size | Result |
 |--------|------:|---------:|-------|
 | Codex sessions | 3,037 | 3.1 GB | archived set (2,303 sessions) **2.42 GB → 0.86 GB** (~64% smaller) |
-| Hermes sessions | 82 (52 `session_*.json`) | 47 MB | 52 sessions summarized → `summary_layer.json` + `fts5_index.json` |
+| Summary-backend sessions | 82 (52 `session_*.json`) | 47 MB | 52 sessions summarized → `summary_layer.json` + `fts5_index.json` |
 
 **~2.4 GB of old Codex sessions now lives in ~860 MB** while remaining fully searchable through the SQLite + FTS5 index. Deleting originals with `archive --move` reclaims the rest.
 

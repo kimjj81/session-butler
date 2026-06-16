@@ -103,6 +103,10 @@ pub struct TuiApp {
     filter_text: String,
     show_help: bool,
     output_buffer: String,
+    // Results 패널 스크롤 상태 (render에서 viewport/total 갱신)
+    results_scroll: usize,
+    results_viewport: usize,
+    results_total_lines: usize,
     // 실행 대기 중인 명령 — run_pending이 꺼내서 실행한다.
     pending: Option<Commands>,
     // 입력값을 저장하는 별도 구조
@@ -274,6 +278,7 @@ impl TuiApp {
                     days: 0,
                     top: 15,
                     by: crate::insights::Granularity::Month,
+                    words: crate::insights::WordsSource::Full,
                     json: false,
                 },
                 args: vec![
@@ -296,6 +301,13 @@ impl TuiApp {
                         description: "버킷 단위 (day/week/month)".to_string(),
                         default_value: "month".to_string(),
                         value: "month".to_string(),
+                        arg_type: ArgType::Text,
+                    },
+                    Arg {
+                        name: "words".to_string(),
+                        description: "단어 분석 소스 (full/first-prompt)".to_string(),
+                        default_value: "full".to_string(),
+                        value: "full".to_string(),
                         arg_type: ArgType::Text,
                     },
                     Arg {
@@ -377,6 +389,9 @@ impl TuiApp {
             filter_text: String::new(),
             show_help: false,
             output_buffer: String::new(),
+            results_scroll: 0,
+            results_viewport: 0,
+            results_total_lines: 0,
             pending: None,
             input_values: std::collections::HashMap::new(),
         }
@@ -567,10 +582,32 @@ impl TuiApp {
     }
 
     fn handle_results_action(&mut self, action: Action) -> Result<()> {
+        let max_scroll = self.results_total_lines.saturating_sub(self.results_viewport);
         match action {
             Action::Confirm | Action::Cancel => {
                 self.state = TuiState::MainMenu;
                 self.output_buffer.clear();
+                self.results_scroll = 0;
+            }
+            Action::Up => {
+                self.results_scroll = self.results_scroll.saturating_sub(1);
+            }
+            Action::Down => {
+                self.results_scroll = (self.results_scroll + 1).min(max_scroll);
+            }
+            Action::PageUp => {
+                let step = self.results_viewport.max(1);
+                self.results_scroll = self.results_scroll.saturating_sub(step);
+            }
+            Action::PageDown => {
+                let step = self.results_viewport.max(1);
+                self.results_scroll = (self.results_scroll + step).min(max_scroll);
+            }
+            Action::Home => {
+                self.results_scroll = 0;
+            }
+            Action::End => {
+                self.results_scroll = max_scroll;
             }
             Action::Quit => {
                 return Err(Error::Cancelled);
@@ -624,8 +661,12 @@ impl TuiApp {
                     "week" => crate::insights::Granularity::Week,
                     _ => crate::insights::Granularity::Month,
                 };
+                let words = match get_val("words").as_str() {
+                    "first-prompt" => crate::insights::WordsSource::FirstPrompt,
+                    _ => crate::insights::WordsSource::Full,
+                };
                 let json = get_val("json") == "true";
-                Commands::Insights { days, top, by, json }
+                Commands::Insights { days, top, by, words, json }
             }
             Commands::Compact { .. } => {
                 let days = get_val("days").parse().unwrap_or(0);
@@ -721,6 +762,7 @@ impl TuiApp {
         let _ = terminal.clear();
 
         self.output_buffer = output;
+        self.results_scroll = 0;
         self.execution_results.push(ExecutionResult {
             success: result.is_ok(),
             output: self.output_buffer.clone(),
@@ -929,16 +971,32 @@ impl TuiApp {
         f.render_widget(paragraph, area);
     }
 
-    fn render_results(&self, f: &mut Frame, area: Rect) {
+    fn render_results(&mut self, f: &mut Frame, area: Rect) {
         let output_lines: Vec<Line> = self
             .output_buffer
             .lines()
             .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::Green))))
             .collect();
 
+        // 보이는 폭/높이로 래핑된 전체 줄 수를 추정해 스크롤 범위를 정한다.
+        let avail = (area.width as usize).saturating_sub(2).max(1);
+        let mut total = 0usize;
+        for line in self.output_buffer.lines() {
+            let w: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+            let rows = if w == 0 { 1 } else { (w + avail - 1) / avail };
+            total += rows.max(1);
+        }
+        self.results_total_lines = total;
+        self.results_viewport = (area.height as usize).saturating_sub(2);
+        let max_scroll = self.results_total_lines.saturating_sub(self.results_viewport);
+        if self.results_scroll > max_scroll {
+            self.results_scroll = max_scroll;
+        }
+
         let paragraph = Paragraph::new(output_lines)
             .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title("Results"))
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((self.results_scroll as u16, 0));
 
         f.render_widget(paragraph, area);
     }
@@ -1036,6 +1094,8 @@ impl TuiApp {
             ]),
             TuiState::Running => Line::from(Span::styled("Running...", Style::default().fg(Color::Yellow))),
             TuiState::Results => Line::from(vec![
+                Span::styled("↑/↓ PgUp/PgDn Home/End", Style::default().fg(Color::Yellow)),
+                Span::from(" Scroll  |  "),
                 Span::styled("Enter/Esc", Style::default().fg(Color::Yellow)),
                 Span::from(" Back to menu"),
             ]),

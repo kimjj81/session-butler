@@ -20,6 +20,32 @@ pub(crate) const STOP_WORDS: &[&str] = &[
     "with", "write", "you", "your",
 ];
 
+/// 단어 빈도 분석용 정규화 토크나이저.
+/// `insights` 단어 분석과 `scanner`의 대화 본문 집계가 공유한다.
+/// token_re 매치 → 앞뒤 구분자(._-/) 제거 → ASCII면 소문자화 →
+/// 불용어/숫자-only 토큰 제거. 빈 문자열은 건너뛴다.
+pub(crate) fn tokenize_words(text: &str, token_re: &Regex) -> Vec<String> {
+    let trim_chars = ['.', '_', '-', '/'];
+    let mut out = Vec::new();
+    for m in token_re.find_iter(text) {
+        let t = m.as_str();
+        let t = t.trim_start_matches(trim_chars);
+        let t = t.trim_end_matches(trim_chars);
+        if t.is_empty() {
+            continue;
+        }
+        let norm = if t.is_ascii() { t.to_ascii_lowercase() } else { t.to_string() };
+        if STOP_WORDS.contains(&norm.as_str()) {
+            continue;
+        }
+        if norm.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        out.push(norm);
+    }
+    out
+}
+
 /// Hermes 세션 요약 생성기
 pub struct SummaryBuilder {
     config: Config,

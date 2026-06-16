@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::i18n;
-use crate::summary::STOP_WORDS;
 use crate::util;
 use chrono::Datelike;
 use regex::Regex;
@@ -47,8 +46,29 @@ impl Granularity {
     }
 }
 
+/// 단어 분석 소스. clap ValueEnum 로 CLI `--words` 파싱.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
+pub enum WordsSource {
+    /// 전체 대화 본문(user/assistant 메시지)
+    #[value(name = "full")]
+    Full,
+    /// 첫 사용자 프롬프트만
+    #[value(name = "first-prompt")]
+    FirstPrompt,
+}
+
+impl WordsSource {
+    /// JSON/식별용 문자열.
+    pub fn id(self) -> &'static str {
+        match self {
+            WordsSource::Full => "full",
+            WordsSource::FirstPrompt => "first-prompt",
+        }
+    }
+}
+
 /// 인사이트 리포트 진입점.
-pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool) -> Result<()> {
+pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool, words: WordsSource) -> Result<()> {
     let db = SessionDb::new(&config.codex_index_db)?;
     let limit = top as i64;
 
@@ -79,20 +99,35 @@ pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool) -
     let projects = db.top_projects(days, limit)?;
     let weekday = db.activity_by_weekday(days)?;
     let ids = db.session_ids_in_window(days)?;
-    let prompts = db.first_user_prompts(days)?;
     let leaders = db.top_sessions_by_tokens(days, 5)?;
 
-    // 시간 버킷 집계 (세션/토큰/스킬/최빈단어)
+    // 단어 분석 소스 분기
+    // - Full: session_words(대화 본문) 테이블에서 직접 집계
+    // - FirstPrompt: first_user_prompt를 토큰화해 집계 (기존 동작)
     let detail = db.session_detail_window(days)?;
     let tool_rows = db.tool_usage_with_dates(days)?;
-    let buckets = build_buckets(&detail, &tool_rows, by, &token_re);
+    let word_rows: Vec<(Option<String>, String, i64)> = match words {
+        WordsSource::Full => db.words_with_dates(days)?,
+        WordsSource::FirstPrompt => prompt_word_rows(&detail, &token_re),
+    };
+    let buckets = build_buckets(&detail, &tool_rows, &word_rows, by);
 
     let peak_hour = peak_hour_from_ids(&ids);
-    let top_words = top_words(&prompts, &token_re, top);
+    let top_words: Vec<(String, i64)> = match words {
+        WordsSource::Full => db.top_words_corpus(days, limit)?,
+        WordsSource::FirstPrompt => {
+            let prompts = db.first_user_prompts(days)?;
+            top_words(&prompts, &token_re, top)
+                .into_iter()
+                .map(|(w, c)| (w, c as i64))
+                .collect()
+        }
+    };
 
     let report = Report {
         window_days: days,
         granularity: by,
+        words_source: words.id(),
         overview: Overview {
             sessions,
             total_tokens: tokens,
@@ -112,7 +147,7 @@ pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool) -
             weekday: weekday_name(wd as usize), weekday_index: wd as i64, sessions: c,
         }).collect(),
         peak_hour,
-        top_words: top_words.into_iter().map(|(w, c)| WordStat { word: w, count: c as i64 }).collect(),
+        top_words: top_words.into_iter().map(|(w, c)| WordStat { word: w, count: c }).collect(),
         token_leaders: leaders.into_iter().map(|(id, d, t, tc, p)| SessionStat {
             session_id: id, date: d, tokens: t, tool_calls: tc, prompt: p,
         }).collect(),
@@ -159,24 +194,24 @@ fn parse_hour(id: &str) -> Option<u32> {
 }
 
 /// 프롬프트에서 정규화된 유효 토큰(불용어/숫자 제거) 추출.
+/// 공용 토크나이저(summary::tokenize_words)로 위임.
 fn valid_tokens(prompt: &str, token_re: &Regex) -> Vec<String> {
-    let trim_chars = ['.', '_', '-', '/'];
+    crate::summary::tokenize_words(prompt, token_re)
+}
+
+/// FirstPrompt 소스용: 세션 상세의 first_user_prompt를 토큰화해
+/// (date, word, count) 행 목록으로 변환. build_buckets의 word_rows 입력.
+fn prompt_word_rows(
+    detail: &[(Option<String>, String, i64, Option<String>)],
+    token_re: &Regex,
+) -> Vec<(Option<String>, String, i64)> {
     let mut out = Vec::new();
-    for m in token_re.find_iter(prompt) {
-        let mut t = m.as_str();
-        t = t.trim_start_matches(trim_chars);
-        t = t.trim_end_matches(trim_chars);
-        if t.is_empty() {
-            continue;
+    for (date, _sid, _tok, prompt) in detail {
+        if let Some(p) = prompt {
+            for w in valid_tokens(p, token_re) {
+                out.push((date.clone(), w, 1));
+            }
         }
-        let norm = if t.is_ascii() { t.to_ascii_lowercase() } else { t.to_string() };
-        if STOP_WORDS.contains(&norm.as_str()) {
-            continue;
-        }
-        if norm.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        out.push(norm);
     }
     out
 }
@@ -216,26 +251,23 @@ struct BucketAcc {
     tools: HashMap<String, i64>,
 }
 
-/// 세션 상세 + tool 사용(날짜 포함)을 버킷별로 집계.
+/// 세션 상세 + tool 사용 + 단어(날짜 포함)를 버킷별로 집계.
+/// 단어는 소스(Full=대화 본문 / FirstPrompt=첫 프롬프트 토큰화)에 따라
+/// 호출측에서 word_rows로 만들어 전달한다.
 fn build_buckets(
     detail: &[(Option<String>, String, i64, Option<String>)],
     tool_rows: &[(Option<String>, String, i64)],
+    word_rows: &[(Option<String>, String, i64)],
     by: Granularity,
-    token_re: &Regex,
 ) -> Vec<TimeBucket> {
     let mut accs: HashMap<String, BucketAcc> = HashMap::new();
 
-    for (date, _sid, tokens, prompt) in detail {
+    for (date, _sid, tokens, _prompt) in detail {
         let Some(date_str) = date else { continue };
         let Some(label) = bucket_label(date_str, by) else { continue };
         let a = accs.entry(label).or_default();
         a.sessions += 1;
         a.tokens += tokens;
-        if let Some(p) = prompt {
-            for w in valid_tokens(p, token_re) {
-                *a.words.entry(w).or_insert(0) += 1;
-            }
-        }
     }
 
     for (date, tool, count) in tool_rows {
@@ -243,6 +275,14 @@ fn build_buckets(
         let Some(label) = bucket_label(date_str, by) else { continue };
         if let Some(a) = accs.get_mut(&label) {
             *a.tools.entry(tool.clone()).or_insert(0) += count;
+        }
+    }
+
+    for (date, word, count) in word_rows {
+        let Some(date_str) = date else { continue };
+        let Some(label) = bucket_label(date_str, by) else { continue };
+        if let Some(a) = accs.get_mut(&label) {
+            *a.words.entry(word.clone()).or_insert(0) += count;
         }
     }
 
@@ -370,7 +410,7 @@ fn render_text(r: &Report) {
     }
 
     // Top words
-    println!("\n■ {}", i18n::insights_section("words"));
+    println!("\n■ {}", i18n::insights_words_header(r.words_source));
     if r.top_words.is_empty() {
         println!("  {}", i18n::insights_empty());
     } else {
@@ -430,6 +470,8 @@ fn truncate(s: &str, limit: usize) -> String {
 struct Report {
     window_days: u64,
     granularity: Granularity,
+    /// 단어 분석 소스 ("full" | "first-prompt")
+    words_source: &'static str,
     overview: Overview,
     top_tools: Vec<ToolStat>,
     least_used_tools: Vec<ToolStat>,

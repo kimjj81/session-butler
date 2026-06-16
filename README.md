@@ -26,13 +26,16 @@ The tool manages **Codex** session logs and summarizes **Hermes** session logs. 
 
 | Command | What it does |
 |---------|--------------|
-| `scan` | Walk Codex `rollout-*.jsonl`, write metadata + FTS5 full-text index to SQLite |
-| `archive` | zstd-compress sessions older than N days. `--move` deletes originals after; `--skip-scan` skips the pre-archive scan |
+| `scan` | Walk **all** Codex `rollout-*.jsonl`, write metadata + FTS5 full-text index to SQLite |
+| `archive` | zstd-compress sessions **older than the retention window** (keeps the recent N days). `--move` deletes originals after; `--skip-scan` skips the pre-archive scan |
 | `restore` | Restore from `.zst` — reads the **DB archive index** (works even if originals are gone). `--purge` deletes the `.zst` afterward |
-| `list` / `stats` | List / summarize archived + active sessions |
+| `list` / `stats` | List / summarize sessions from the last N days |
+| `insights` | Usage insights from indexed data — tools/skills, projects, token/time trends (`--by day/week/month`), top words |
 | `compact` | Safe compaction + sensitive-info detection (`.env`, tokens, keys) |
 
 Archive state and SHA-256 checksums are stored in the **SQLite index**, so `restore` can verify integrity and find sessions even after originals are removed.
+
+> **Scope of `--days`:** `scan` always indexes **every** session (it takes no `--days`). The `--days` flag only narrows the *other* commands — a **retention window** for `archive`/`compact`/`pipeline` (keep the recent N days, act on the older ones) and a **look-back window** for `list`/`stats`/`insights` (last N days; `0` = all time on `insights`).
 
 ### Hermes — summarize session logs
 
@@ -68,6 +71,8 @@ session-butler --tui    # explicit
 
 The TUI shows a **status bar** with the active backends, session paths, and retention days at all times, and lists only the commands for enabled backends.
 
+While a command runs, the TUI temporarily yields the terminal so the **live progress bar** (spinner + bar + `N/total` + `%` + ETA) shows in real time, then returns to a **Results** panel with the captured output.
+
 ### CLI
 
 ```bash
@@ -81,9 +86,10 @@ session-butler archive  --days 30 --move       # compress then delete originals
 session-butler restore  --all                  # restore (keeps .zst for re-restore)
 session-butler restore  --all --purge          # restore then delete .zst
 
-# Codex — list / stats / compact
+# Codex — list / stats / insights / compact
 session-butler list   --days 30 [--json]
 session-butler stats  --days 30
+session-butler insights [--days 0] [--top 15] [--by month]   # 0 = all time
 session-butler compact --scan-sensitive        # scan for secrets only
 
 # Hermes — summarize
@@ -148,7 +154,7 @@ Measured on my own session history:
 
 ## Status
 
-Scan/index, archive/restore (SQLite-backed), compaction, summarization, TUI, and CLI are all functional.
+Scan/index, archive/restore (SQLite-backed), compaction, usage insights, summarization, TUI (with live progress), and CLI are all functional.
 
 ## License
 

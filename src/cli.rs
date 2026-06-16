@@ -77,7 +77,7 @@ pub enum Commands {
 
     /// Codex: compress sessions (--move deletes originals, --skip-scan skips pre-scan)
     Archive {
-        /// Retention days (only older sessions)
+        /// Retention window: keep recent N days, compress older sessions
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
@@ -104,7 +104,7 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// Target days
+        /// Restore archived sessions from the last N days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
@@ -119,7 +119,7 @@ pub enum Commands {
 
     /// Codex: list sessions
     List {
-        /// Target days
+        /// Show sessions from the last N days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
@@ -130,7 +130,7 @@ pub enum Commands {
 
     /// Codex: statistics
     Stats {
-        /// Target days
+        /// Stats from the last N days
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
     },
@@ -156,7 +156,7 @@ pub enum Commands {
 
     /// Codex: compaction + sensitive-info (.env/token/key) scan
     Compact {
-        /// Target days
+        /// Compact sessions older than N days (0 = all before today)
         #[arg(short = 'd', long, default_value = "0")]
         days: u64,
 
@@ -198,7 +198,7 @@ pub enum Commands {
         #[arg(long)]
         skip_summarize: bool,
 
-        /// Retention days
+        /// Retention window (days) for archive/compact
         #[arg(short = 'd', long, default_value = "30")]
         days: u64,
 
@@ -238,8 +238,8 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             let db = SessionDb::new(&config.codex_index_db)?;
             let archiver = SessionArchiver::new(config);
-            // DB 기반 대상 선정 (archived=0, 최근 days일)
-            let sessions = db.list_active_by_days(days)?;
+            // DB 기반 대상 선정 (archived=0, 보존기간 days일보다 오래된 세션)
+            let sessions = db.list_archive_candidates(days)?;
             if skip_scan && sessions.is_empty() && db.count_sessions()? == 0 {
                 eprintln!("{}", i18n::skip_scan_empty());
             }
@@ -380,7 +380,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("Archiving sessions...");
                 let db = SessionDb::new(&config.codex_index_db)?;
                 let archiver = SessionArchiver::new(config.clone());
-                let sessions = db.list_active_by_days(days)?;
+                let sessions = db.list_archive_candidates(days)?;
                 let filtered: Vec<&SessionInfo> = sessions.iter().collect();
                 archiver.archive(&filtered, dry_run, false, &db)?;
                 println!("Archive complete.\n");

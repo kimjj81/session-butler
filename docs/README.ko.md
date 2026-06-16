@@ -26,13 +26,16 @@
 
 | 명령 | 하는 일 |
 |------|---------|
-| `scan` | Codex `rollout-*.jsonl`을 순회하며 메타데이터 + FTS5 전문검색 인덱스를 SQLite에 저장 |
-| `archive` | N일 이상 지난 세션을 zstd 압축. `--move`는 압축 후 원본 삭제, `--skip-scan`은 사전 스캔 생략 |
+| `scan` | Codex `rollout-*.jsonl` **전체**를 순회하며 메타데이터 + FTS5 전문검색 인덱스를 SQLite에 저장 |
+| `archive` | 보존 기간보다 **오래된** 세션을 zstd 압축(최근 N일은 보존). `--move`는 압축 후 원본 삭제, `--skip-scan`은 사전 스캔 생략 |
 | `restore` | `.zst`에서 복원 — **DB 아카이브 인덱스**를 읽습니다(원본이 없어도 동작). `--purge`는 복원 후 `.zst` 삭제 |
-| `list` / `stats` | 보관/활성 세션 목록 및 통계 |
+| `list` / `stats` | 최근 N일 세션의 목록 및 통계 |
+| `insights` | 인덱싱된 데이터로 사용 인사이트 — tool/skill, 프로젝트, 토큰/시간 추세(`--by day/week/month`), 상위 단어 |
 | `compact` | 안전한 컴팩션 + 민감정보 탐지(`.env`, token, key) |
 
 아카이브 상태와 SHA-256 체크섬은 **SQLite 인덱스**에 저장되어, `restore`가 무결성을 검증하고 원본 삭제 후에도 세션을 찾을 수 있습니다.
+
+> **`--days`의 범위:** `scan`은 항상 **모든** 세션을 색인합니다(`--days` 없음). `--days`는 다른 명령의 대상만 좁힙니다 — `archive`/`compact`/`pipeline`에서는 **보존 기간**(최근 N일은 두고 그 이전에 작업), `list`/`stats`/`insights`에서는 **조회 기간**(최근 N일, `insights`는 `0` = 전체).
 
 ### Hermes — 세션 로그 요약
 
@@ -68,6 +71,8 @@ session-butler --tui    # 명시적 실행
 
 TUI는 상단에 **status 바**로 활성 백엔드, 세션 경로, 보존 일수를 항상 표시하며, 활성화된 백엔드의 명령만 목록에 보여줍니다.
 
+명령 실행 중에는 TUI가 잠시 터미널을 내주어 **실시간 진행률 바**(스피너 + 바 + `N/전체` + `%` + ETA)가 보이고, 끝나면 캡처한 출력을 담은 **Results** 패널로 돌아옵니다.
+
 ### CLI
 
 ```bash
@@ -81,9 +86,10 @@ session-butler archive  --days 30 --move       # 압축 후 원본 삭제
 session-butler restore  --all                  # 복원 (.zst 유지, 재복원 가능)
 session-butler restore  --all --purge          # 복원 후 .zst 삭제
 
-# Codex — 목록 / 통계 / 컴팩션
+# Codex — 목록 / 통계 / 인사이트 / 컴팩션
 session-butler list   --days 30 [--json]
 session-butler stats  --days 30
+session-butler insights [--days 0] [--top 15] [--by month]   # 0 = 전체
 session-butler compact --scan-sensitive        # 민감정보 스캔만
 
 # Hermes — 요약
@@ -148,7 +154,7 @@ Codex와 Hermes 각각 활성화/비활성화할 수 있습니다. 우선순위(
 
 ## 개발 현황
 
-스캔/인덱싱, 압축/복원(SQLite 기반), 컴팩션, 요약, TUI, CLI 모두 동작한다.
+스캔/인덱싱, 압축/복원(SQLite 기반), 컴팩션, 사용 인사이트, 요약, TUI(실시간 진행률 포함), CLI 모두 동작한다.
 
 ## 라이선스
 

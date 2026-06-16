@@ -356,12 +356,13 @@ impl SessionDb {
         Ok(rows)
     }
 
-    /// 최근 days일 이내의 활성(archived 아님) 세션 조회 (archive 대상 선정)
-    pub fn list_active_by_days(&self, days: u64) -> Result<Vec<SessionInfo>> {
+    /// 보존 기간(days)보다 오래된 활성(archived 아님) 세션 조회 (archive 대상 선정).
+    /// 최근 days일은 보존하고 그 이전 세션을 압축 대상으로 반환한다 (compact와 동일 방향).
+    pub fn list_archive_candidates(&self, days: u64) -> Result<Vec<SessionInfo>> {
         let cutoff = Self::days_cutoff(days);
         let mut stmt = self.conn.prepare(
             "SELECT path, date, size_bytes, session_id, model_provider, cli_version
-             FROM sessions WHERE archived = 0 AND date >= ?1"
+             FROM sessions WHERE archived = 0 AND date < ?1"
         ).map_err(|e| Error::Sqlite(e))?;
         let rows = stmt.query_map(params![cutoff], |row| {
             let path: String = row.get::<_, Option<String>>(0)?.unwrap_or_default();

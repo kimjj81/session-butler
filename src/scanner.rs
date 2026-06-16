@@ -238,22 +238,23 @@ impl CodexScanner {
                             }
                         }
 
-                        // tools 단어 집계 (도구 호출 인자/입력 + 출력/결과/코드).
-                        // 노이즈가 크므로 별도 카테고리로 분리 저장.
+                        // tools 단어 집계 — 도구 호출 인자/입력만. 비밀이 섞일 수 있는
+                        // 출력 본문(function_call_output/custom_tool_call_output)은 색인하지 않는다.
+                        // 인자/입력도 looks_secret 게이트를 통과한 안전한 것만.
                         match item_type {
                             Some("function_call") => {
                                 if let Some(args) = payload.get("arguments").and_then(|v| v.as_str()) {
-                                    add_words(&mut meta, "tools", &json_string_values(args), token_re);
+                                    let vals = json_string_values(args);
+                                    if !looks_secret(&vals) {
+                                        add_words(&mut meta, "tools", &vals, token_re);
+                                    }
                                 }
                             }
                             Some("custom_tool_call") => {
                                 if let Some(inp) = payload.get("input").and_then(|v| v.as_str()) {
-                                    add_words(&mut meta, "tools", inp, token_re);
-                                }
-                            }
-                            Some("function_call_output") | Some("custom_tool_call_output") => {
-                                if let Some(out) = payload.get("output").and_then(|v| v.as_str()) {
-                                    add_words(&mut meta, "tools", out, token_re);
+                                    if !looks_secret(inp) {
+                                        add_words(&mut meta, "tools", inp, token_re);
+                                    }
                                 }
                             }
                             _ => {}
@@ -413,6 +414,28 @@ fn json_string_values(s: &str) -> String {
     }
 }
 
+/// 자격증명/비밀이 의심되는 텍스트인지 휴리스틱 판정.
+/// tools 카테고리 단어 색인 전에 걸러 — 실수로 비밀이 SQLite에 남는 것을 방지.
+/// (출력 본문 전체는 이미 색인 제외; 이것은 인자/입력용 추가 안전망.)
+fn looks_secret(text: &str) -> bool {
+    const SIGNS: &[&str] = &[
+        "eyJ",              // JWT
+        "sk-",              // OpenAI 계열 키
+        "Bearer ",
+        "ghp_", "gho_", "github_pat_", // GitHub 토큰
+        "AKIA",             // AWS access key id
+        "xox",              // Slack
+        "_TOKEN=", "_KEY=", "_SECRET=",
+    ];
+    let lower = text.to_ascii_lowercase();
+    lower.contains("api_key")
+        || lower.contains("access_token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("private_key")
+        || SIGNS.iter().any(|s| text.contains(s))
+}
+
 /// 주입 컨텍스트(AGENTS.md, 시스템 지시문 등) 휴리스틱 감지.
 /// first_user_prompt 노이즈 제거용 — 진짜 사용자 프롬프트를 찾을 때까지 건너뛴다.
 fn looks_like_injected_context(text: &str) -> bool {
@@ -491,12 +514,12 @@ mod tests {
         assert_eq!(reas.get("login"), Some(&1));
         assert_eq!(reas.get("flow"), Some(&1));
 
-        // tools: function_call arguments(문자열 값만) + function_call_output
-        //   args "grep login auth.rs" + output "auth.rs:42 login validated"
+        // tools: function_call arguments(문자열 값만). 출력 본문은 privacy상 색인 제외.
+        //   args "grep login auth.rs /test" 만 → grep/login/auth.rs/test
         let tools = meta.word_counts.get("tools").expect("tools category");
         assert_eq!(tools.get("grep"), Some(&1));
-        assert_eq!(tools.get("login"), Some(&2)); // args + output
+        assert_eq!(tools.get("login"), Some(&1)); // args 에만 (output 은 제외)
         assert!(tools.get("cmd").is_none()); // JSON 키는 제외됨
-        assert!(tools.get("validated").is_some());
+        assert!(tools.get("validated").is_none()); // 출력 본문 단어는 색인되지 않음
     }
 }

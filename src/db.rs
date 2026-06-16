@@ -714,6 +714,14 @@ impl SessionDb {
         Ok(rows)
     }
 
+    /// session_words 테이블이 비어 있는지(미백필) — 기존 인덱스 폴백 판정용.
+    pub fn session_words_empty(&self) -> Result<bool> {
+        let mut stmt = self.conn.prepare("SELECT EXISTS(SELECT 1 FROM session_words LIMIT 1)")
+            .map_err(|e| Error::Sqlite(e))?;
+        let has: i64 = stmt.query_row([], |r| r.get(0)).map_err(|e| Error::Sqlite(e))?;
+        Ok(has == 0)
+    }
+
     /// 특정 카테고리 단어 순위 (word, 총 빈도). 많이 쓴 순.
     pub fn top_words_category(&self, days: u64, category: &str, limit: i64) -> Result<Vec<(String, i64)>> {
         let cutoff = Self::cutoff_bound(days);

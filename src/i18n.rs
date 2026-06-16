@@ -343,3 +343,11 @@ pub fn insights_words_header(id: &str) -> &'static str {
         (Lang::En, _) => "Top words",
     }
 }
+
+/// 기존 인덱스 폴백 안내 — session_words 미백필 시 첫 프롬프트로 표시함을 알림.
+pub fn insights_words_fallback_note() -> &'static str {
+    match lang() {
+        Lang::Ko => "참고: 단어 카테고리 데이터가 없어 첫 프롬프트 기반으로 표시합니다. `scan` 재실행 시 대화/추론/도구별 분석이 활성화됩니다.",
+        Lang::En => "Note: word-category data not found; showing first-prompt words. Re-run `scan` to enable conversation/reasoning/tools breakdown.",
+    }
+}

@@ -126,21 +126,25 @@ pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool, w
 
     // 단어 분석: 카테고리별 섹션. all → 3카테고리 각각, 단일 카테고리 → 1섹션,
     // first-prompt → 첫 프롬프트 토큰화(기존 동작).
+    // 기존 인덱스(session_words 미백필) 보호: 카테고리 데이터가 없으면 첫 프롬프트로 폴백.
     let detail = db.session_detail_window(days)?;
     let tool_rows = db.tool_usage_with_dates(days)?;
-    let word_rows: Vec<(Option<String>, String, i64)> = match words.bucket_category() {
+    let words_fallback = db.session_words_empty()? && !matches!(words, WordsSource::FirstPrompt);
+    let effective_words = if words_fallback { WordsSource::FirstPrompt } else { words };
+    let word_rows: Vec<(Option<String>, String, i64)> = match effective_words.bucket_category() {
         Some(cat) => db.words_with_dates_category(days, cat)?,
         None => prompt_word_rows(&detail, &token_re),
     };
     let buckets = build_buckets(&detail, &tool_rows, &word_rows, by);
 
     let peak_hour = peak_hour_from_ids(&ids);
-    let word_sections = build_word_sections(&db, words, days, top, limit, &token_re)?;
+    let word_sections = build_word_sections(&db, effective_words, days, top, limit, &token_re)?;
 
     let report = Report {
         window_days: days,
         granularity: by,
-        words_source: words.id(),
+        words_source: effective_words.id(),
+        words_fallback,
         overview: Overview {
             sessions,
             total_tokens: tokens,
@@ -469,6 +473,9 @@ fn render_text(r: &Report) {
     }
 
     // Top words — 카테고리별 섹션 (conversation/reasoning/tools/first-prompt)
+    if r.words_fallback {
+        println!("\n{}", i18n::insights_words_fallback_note());
+    }
     for section in &r.top_words {
         println!("\n■ {}", i18n::insights_words_header(&section.category));
         if section.words.is_empty() {
@@ -531,8 +538,10 @@ fn truncate(s: &str, limit: usize) -> String {
 struct Report {
     window_days: u64,
     granularity: Granularity,
-    /// 단어 분석 소스 ("full" | "first-prompt")
+    /// 단어 분석 소스 ("all"|"conversation"|"reasoning"|"tools"|"first-prompt")
     words_source: &'static str,
+    /// 기존 인덱스(session_words 미백필)로 첫 프롬프트 폴백 중이면 true
+    words_fallback: bool,
     overview: Overview,
     top_tools: Vec<ToolStat>,
     least_used_tools: Vec<ToolStat>,

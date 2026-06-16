@@ -2,6 +2,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::types::SensitiveFile;
 use regex::Regex;
 use std::fs;
@@ -98,11 +99,14 @@ impl SessionCompactor {
     pub fn discover_sensitive_files(&self) -> Result<Vec<SensitiveFile>> {
         let mut results = Vec::new();
 
+        let pb = crate::progress::spinner(&i18n::scan_sensitive_progress_label());
+
         for entry in WalkDir::new(&self.config.hermes_sessions)
             .follow_links(false)
             .into_iter()
             .filter_map(|e| e.ok())
         {
+            pb.inc(1);
             let path = entry.path();
 
             // trash 디렉토리는 건너뜀
@@ -134,6 +138,7 @@ impl SessionCompactor {
                 _ => {}
             }
         }
+        pb.finish();
 
         Ok(results)
     }
@@ -203,7 +208,10 @@ impl SessionCompactor {
         let mut moved = Vec::new();
         let mut skipped = Vec::new();
 
+        let pb = crate::progress::bar(old_sessions.len() as u64, &i18n::compact_progress_label());
+
         for path in &old_sessions {
+            pb.inc(1);
             if dry_run {
                 println!("Would move {} to trash", path.display());
                 skipped.push(path.clone());
@@ -221,6 +229,7 @@ impl SessionCompactor {
                 }
             }
         }
+        pb.finish();
 
         Ok(CompactionResult {
             moved,

@@ -5,6 +5,7 @@ use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::i18n;
 use crate::types::{ArchivedSession, ArchivedSessionRow, SessionInfo};
+use crate::util;
 use chrono::Datelike;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -157,7 +158,10 @@ impl SessionArchiver {
         let mut total_original = 0u64;
         let mut total_compressed = 0u64;
 
+        let pb = crate::progress::bar(sessions.len() as u64, &i18n::archive_progress_label());
+
         for session in sessions {
+            pb.inc(1);
             let src = &session.path;
             let zst_path = self.zst_dest_path(session);
 
@@ -236,6 +240,7 @@ impl SessionArchiver {
             total_original += session.size_bytes;
             total_compressed += compressed_size;
         }
+        pb.finish();
 
         // 요약 출력
         let ratio = if total_original > 0 {
@@ -384,7 +389,10 @@ impl SessionArchiver {
     pub fn restore(&self, rows: &[ArchivedSessionRow], dry_run: bool, purge: bool, db: &SessionDb) -> Result<Vec<ArchivedSessionRow>> {
         let mut restored = Vec::new();
 
+        let pb = crate::progress::bar(rows.len() as u64, &i18n::restore_progress_label());
+
         for row in rows {
+            pb.inc(1);
             let zst = &row.compressed_path;
             let dest = &row.path;
 
@@ -455,6 +463,7 @@ impl SessionArchiver {
                 Err(e) => eprintln!("ERROR restoring {}: {}", zst.display(), e),
             }
         }
+        pb.finish();
 
         println!("{}", i18n::restore_summary(restored.len()));
         Ok(restored)
@@ -479,7 +488,7 @@ impl SessionArchiver {
                 let total_size: u64 = items.iter().map(|s| s.size_bytes).sum();
                 println!("\n{}: {} sessions, {:.1}MB",
                     date,
-                    items.len(),
+                    util::fmt_int(items.len() as i64),
                     total_size as f64 / (1024.0 * 1024.0)
                 );
 
@@ -492,7 +501,7 @@ impl SessionArchiver {
                 }
 
                 if items.len() > 5 {
-                    println!("  ... and {} more", items.len() - 5);
+                    println!("  ... and {} more", util::fmt_int((items.len() - 5) as i64));
                 }
             }
         }
@@ -521,21 +530,21 @@ impl SessionArchiver {
             *by_month.entry(month).or_default() += 1;
         }
 
-        println!("Sessions: {}", sessions.len());
+        println!("Sessions: {}", util::fmt_int(sessions.len() as i64));
         println!("Total size: {:.2} GB", total_size as f64 / (1024.0 * 1024.0 * 1024.0));
         println!("\nBy provider:");
 
         let mut provider_vec: Vec<_> = by_provider.iter().collect();
         provider_vec.sort_by(|a, b| b.0.cmp(a.0));
         for (provider, count) in provider_vec {
-            println!("  {}: {}", provider, count);
+            println!("  {}: {}", provider, util::fmt_int(*count as i64));
         }
 
         println!("\nBy month:");
         let mut month_vec: Vec<_> = by_month.iter().collect();
         month_vec.sort_by(|a, b| a.0.cmp(b.0));
         for (month, count) in month_vec {
-            println!("  {}: {}", month, count);
+            println!("  {}: {}", month, util::fmt_int(*count as i64));
         }
 
         Ok(())

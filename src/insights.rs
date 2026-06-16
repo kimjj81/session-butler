@@ -8,6 +8,7 @@ use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::i18n;
 use crate::summary::STOP_WORDS;
+use crate::util;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -157,14 +158,9 @@ fn weekday_name(wd: usize) -> String {
     }
 }
 
+/// 토큰 수 표시 — 쉼표 구분 (예: 16,236,291,196).
 fn fmt_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1e3)
-    } else {
-        n.to_string()
-    }
+    util::fmt_int(n)
 }
 
 fn repo_short(url: &str) -> String {
@@ -182,13 +178,13 @@ fn render_text(r: &Report) {
     // Overview
     println!("\n■ {}", i18n::insights_section("overview"));
     let label = |k: &str| i18n::insights_section(k);
-    println!("  {:<14} {}", label("sessions"), r.overview.sessions);
+    println!("  {:<14} {}", label("sessions"), util::fmt_int(r.overview.sessions));
     println!("  {:<14} {}", label("tokens"), fmt_tokens(r.overview.total_tokens));
-    println!("  {:<14} {}", label("tool_calls"), r.overview.total_tool_calls);
-    println!("  {:<14} {}", label("file_changes"), r.overview.total_file_changes);
-    println!("  {:<14} {}", label("projects"), r.overview.distinct_projects);
-    println!("  {:<14} {}", label("tools_distinct"), r.overview.distinct_tools);
-    println!("  {:<14} {}", label("archived"), r.overview.archived);
+    println!("  {:<14} {}", label("tool_calls"), util::fmt_int(r.overview.total_tool_calls));
+    println!("  {:<14} {}", label("file_changes"), util::fmt_int(r.overview.total_file_changes));
+    println!("  {:<14} {}", label("projects"), util::fmt_int(r.overview.distinct_projects));
+    println!("  {:<14} {}", label("tools_distinct"), util::fmt_int(r.overview.distinct_tools));
+    println!("  {:<14} {}", label("archived"), util::fmt_int(r.overview.archived));
     let range = match (&r.overview.date_from, &r.overview.date_to) {
         (Some(a), Some(b)) => format!("{} ~ {}", a, b),
         _ => "-".to_string(),
@@ -211,9 +207,9 @@ fn render_text(r: &Report) {
     if r.top_projects.is_empty() {
         println!("  {}", i18n::insights_empty());
     } else {
-        println!("  {:<34} {:>7} {:>10}", label("repo"), label("sessions"), label("tokens"));
+        println!("  {:<34} {:>9} {:>16}", label("repo"), label("sessions"), label("tokens"));
         for p in &r.top_projects {
-            println!("  {:<34} {:>7} {:>10}", truncate(&repo_short(&p.repo), 34), p.sessions, fmt_tokens(p.tokens));
+            println!("  {:<34} {:>9} {:>16}", truncate(&repo_short(&p.repo), 34), util::fmt_int(p.sessions), fmt_tokens(p.tokens));
         }
     }
 
@@ -222,9 +218,9 @@ fn render_text(r: &Report) {
     if r.monthly_trend.is_empty() {
         println!("  {}", i18n::insights_empty());
     } else {
-        println!("  {:<9} {:>7} {:>9} {:>9} {:>9}", label("month"), label("sessions"), label("tool_calls"), label("file_changes"), label("tokens"));
+        println!("  {:<9} {:>7} {:>11} {:>13} {:>16}", label("month"), label("sessions"), label("tool_calls"), label("file_changes"), label("tokens"));
         for m in &r.monthly_trend {
-            println!("  {:<9} {:>7} {:>9} {:>9} {:>9}", m.month, m.sessions, m.tool_calls, m.file_changes, fmt_tokens(m.tokens));
+            println!("  {:<9} {:>7} {:>11} {:>13} {:>16}", m.month, util::fmt_int(m.sessions), util::fmt_int(m.tool_calls), util::fmt_int(m.file_changes), fmt_tokens(m.tokens));
         }
     }
 
@@ -237,7 +233,7 @@ fn render_text(r: &Report) {
         for w in &r.activity_by_weekday {
             let bar_len = (w.sessions * 20 / max_c) as usize;
             let bar = "█".repeat(bar_len);
-            println!("  {} {:>5}  {}", w.weekday, w.sessions, bar);
+            println!("  {} {:>7}  {}", w.weekday, util::fmt_int(w.sessions), bar);
         }
     }
 
@@ -251,7 +247,7 @@ fn render_text(r: &Report) {
             if i > 0 {
                 line.push_str("   ");
             }
-            line.push_str(&format!("{}({})", w.word, w.count));
+            line.push_str(&format!("{}({})", w.word, util::fmt_int(w.count)));
         }
         println!("{}", line);
     }
@@ -266,7 +262,7 @@ fn render_text(r: &Report) {
             let prompt = s.prompt.as_deref().map(|p| truncate(p, 60)).unwrap_or_default();
             println!("  {} [{}] {} | {}",
                 truncate(&s.session_id, 26), date, fmt_tokens(s.tokens), prompt);
-            println!("       {}: {}", label("tool_calls"), s.tool_calls);
+            println!("       {}: {}", label("tool_calls"), util::fmt_int(s.tool_calls));
         }
     }
 
@@ -282,7 +278,7 @@ fn print_tools(v: &[ToolStat]) {
     for t in v {
         let bar_len = (t.calls * 24 / max_c) as usize;
         let bar = "█".repeat(bar_len);
-        println!("  {:<32} {:>7}  {}", truncate(&t.tool, 32), t.calls, bar);
+        println!("  {:<32} {:>12}  {}", truncate(&t.tool, 32), util::fmt_int(t.calls), bar);
     }
 }
 

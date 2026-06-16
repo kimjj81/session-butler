@@ -61,22 +61,27 @@ impl CodexScanner {
             println!("{}", i18n::scan_found(total_files));
         }
 
+        // 진행률 바 (터미널일 때만 표시; TUI gag/파이프는 hidden)
+        let visible = self.progress && std::io::IsTerminal::is_terminal(&std::io::stderr());
+        let pb = crate::progress::bar_if(total_files as u64, &i18n::scan_progress_label(), self.progress);
+
         // 추출
         let mut results = Vec::new();
-        for (processed, path) in files.iter().enumerate() {
-            let human_idx = processed + 1;
+        for path in files.iter() {
+            pb.inc(1);
             match self.extract_session_meta(path) {
-                Ok(meta) => {
-                    results.push(meta);
-                    if self.progress && human_idx % 500 == 0 {
-                        println!("{}", i18n::scan_scanning(human_idx, total_files));
-                    }
-                }
+                Ok(meta) => results.push(meta),
                 Err(e) => {
-                    eprintln!("  ERROR processing {}: {}", path.display(), e);
+                    let msg = format!("  ERROR processing {}: {}", path.display(), e);
+                    if visible {
+                        pb.println(msg);
+                    } else {
+                        eprintln!("{}", msg);
+                    }
                 }
             }
         }
+        pb.finish();
 
         if self.progress {
             println!("{}", i18n::scan_scanned(results.len()));
@@ -279,16 +284,19 @@ impl CodexScanner {
     pub fn index_sessions(&self, metas: Vec<CodexSessionMeta>) -> Result<()> {
         let db = SessionDb::new(&self.config.codex_index_db)?;
 
+        let pb = crate::progress::spinner(&i18n::scan_indexing_label());
         db.begin_transaction()?;
 
         for meta in &metas {
             if let Err(e) = db.upsert_session(meta) {
                 eprintln!("Error indexing session {}: {}", meta.session_id, e);
             }
+            pb.inc(1);
         }
 
         db.commit()?;
         drop(db);
+        pb.finish();
 
         if self.progress {
             println!("{}", i18n::scan_indexed(metas.len(), &self.config.codex_index_db.display().to_string()));

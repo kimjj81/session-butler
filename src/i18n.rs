@@ -1,5 +1,6 @@
 //! i18n (한국어/영어) — 직접 구현. 글로벌 언어 상태 + 메시지 함수.
 
+use crate::util;
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,15 +68,15 @@ pub fn backend_disabled(name: &str) -> String {
 
 pub fn archive_start_move(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 세션을 압축하고 원본 .jsonl을 삭제합니다 (--move)", n),
-        Lang::En => format!("Compressing {} session(s) and deleting originals (--move)", n),
+        Lang::Ko => format!("{}개 세션을 압축하고 원본 .jsonl을 삭제합니다 (--move)", util::fmt_int(n as i64)),
+        Lang::En => format!("Compressing {} session(s) and deleting originals (--move)", util::fmt_int(n as i64)),
     }
 }
 
 pub fn archive_start_keep(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 세션을 압축합니다 (원본 보존)", n),
-        Lang::En => format!("Compressing {} session(s) (originals kept)", n),
+        Lang::Ko => format!("{}개 세션을 압축합니다 (원본 보존)", util::fmt_int(n as i64)),
+        Lang::En => format!("Compressing {} session(s) (originals kept)", util::fmt_int(n as i64)),
     }
 }
 
@@ -88,36 +89,36 @@ pub fn archive_start_none() -> &'static str {
 
 pub fn archive_start_dryrun(n: usize, mode: &str) -> String {
     match lang() {
-        Lang::Ko => format!("[dry-run] 압축 대상 {}개 세션 (원본 {})", n, mode),
-        Lang::En => format!("[dry-run] {} session(s) to archive (originals {})", n, mode),
+        Lang::Ko => format!("[dry-run] 압축 대상 {}개 세션 (원본 {})", util::fmt_int(n as i64), mode),
+        Lang::En => format!("[dry-run] {} session(s) to archive (originals {})", util::fmt_int(n as i64), mode),
     }
 }
 
 pub fn archive_summary(n: usize, a: f64, b: f64, p: f64) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 세션 압축 ({:.1}GB → {:.1}GB, {:.0}% 축소)", n, a, b, p),
-        Lang::En => format!("Archived {} sessions ({:.1}GB -> {:.1}GB, {:.0}% reduction)", n, a, b, p),
+        Lang::Ko => format!("{}개 세션 압축 ({:.1}GB → {:.1}GB, {:.0}% 축소)", util::fmt_int(n as i64), a, b, p),
+        Lang::En => format!("Archived {} sessions ({:.1}GB -> {:.1}GB, {:.0}% reduction)", util::fmt_int(n as i64), a, b, p),
     }
 }
 
 pub fn archive_skipped(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("건너뜀: {}개 세션", n),
-        Lang::En => format!("Skipped: {} sessions", n),
+        Lang::Ko => format!("건너뜀: {}개 세션", util::fmt_int(n as i64)),
+        Lang::En => format!("Skipped: {} sessions", util::fmt_int(n as i64)),
     }
 }
 
 pub fn restore_start_purge(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 복원 + 보관본 삭제 (--purge)", n),
-        Lang::En => format!("Restoring {} + deleting archives (--purge)", n),
+        Lang::Ko => format!("{}개 복원 + 보관본 삭제 (--purge)", util::fmt_int(n as i64)),
+        Lang::En => format!("Restoring {} + deleting archives (--purge)", util::fmt_int(n as i64)),
     }
 }
 
 pub fn restore_start_keep(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 복원 (.zst 보존, 재복원 가능)", n),
-        Lang::En => format!("Restoring {} (.zst kept, re-restorable)", n),
+        Lang::Ko => format!("{}개 복원 (.zst 보존, 재복원 가능)", util::fmt_int(n as i64)),
+        Lang::En => format!("Restoring {} (.zst kept, re-restorable)", util::fmt_int(n as i64)),
     }
 }
 
@@ -130,43 +131,85 @@ pub fn restore_start_none() -> &'static str {
 
 pub fn restore_start_dryrun(n: usize, mode: &str) -> String {
     match lang() {
-        Lang::Ko => format!("[dry-run] 복원 대상 {}개 세션 (.zst {})", n, mode),
-        Lang::En => format!("[dry-run] {} session(s) to restore (.zst {})", n, mode),
+        Lang::Ko => format!("[dry-run] 복원 대상 {}개 세션 (.zst {})", util::fmt_int(n as i64), mode),
+        Lang::En => format!("[dry-run] {} session(s) to restore (.zst {})", util::fmt_int(n as i64), mode),
     }
 }
 
 pub fn restore_summary(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 세션 복원", n),
-        Lang::En => format!("Restored {} sessions", n),
+        Lang::Ko => format!("{}개 세션 복원", util::fmt_int(n as i64)),
+        Lang::En => format!("Restored {} sessions", util::fmt_int(n as i64)),
+    }
+}
+
+pub fn archive_progress_label() -> String {
+    match lang() {
+        Lang::Ko => "압축 중".to_string(),
+        Lang::En => "Archiving".to_string(),
+    }
+}
+
+pub fn restore_progress_label() -> String {
+    match lang() {
+        Lang::Ko => "복원 중".to_string(),
+        Lang::En => "Restoring".to_string(),
+    }
+}
+
+pub fn compact_progress_label() -> String {
+    match lang() {
+        Lang::Ko => "compaction 중".to_string(),
+        Lang::En => "Compacting".to_string(),
+    }
+}
+
+pub fn scan_sensitive_progress_label() -> String {
+    match lang() {
+        Lang::Ko => "민감정보 스캔 중".to_string(),
+        Lang::En => "Scanning sensitive info".to_string(),
     }
 }
 
 pub fn scan_found(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 JSONL 파일 발견", n),
-        Lang::En => format!("Found {} JSONL files", n),
+        Lang::Ko => format!("{}개 JSONL 파일 발견", util::fmt_int(n as i64)),
+        Lang::En => format!("Found {} JSONL files", util::fmt_int(n as i64)),
     }
 }
 
 pub fn scan_scanning(done: usize, total: usize) -> String {
     match lang() {
-        Lang::Ko => format!("  스캔 중 {}/{}...", done, total),
-        Lang::En => format!("  scanned {}/{}...", done, total),
+        Lang::Ko => format!("  스캔 중 {}/{}...", util::fmt_int(done as i64), util::fmt_int(total as i64)),
+        Lang::En => format!("  scanned {}/{}/...", util::fmt_int(done as i64), util::fmt_int(total as i64)),
     }
 }
 
 pub fn scan_scanned(n: usize) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 세션 메타데이터 추출", n),
-        Lang::En => format!("Extracted metadata for {} sessions", n),
+        Lang::Ko => format!("{}개 세션 메타데이터 추출", util::fmt_int(n as i64)),
+        Lang::En => format!("Extracted metadata for {} sessions", util::fmt_int(n as i64)),
     }
 }
 
 pub fn scan_indexed(n: usize, path: &str) -> String {
     match lang() {
-        Lang::Ko => format!("{}개 세션 인덱싱 → {}", n, path),
-        Lang::En => format!("Indexed {} sessions to {}", n, path),
+        Lang::Ko => format!("{}개 세션 인덱싱 → {}", util::fmt_int(n as i64), path),
+        Lang::En => format!("Indexed {} sessions to {}", util::fmt_int(n as i64), path),
+    }
+}
+
+pub fn scan_progress_label() -> String {
+    match lang() {
+        Lang::Ko => "스캔 중".to_string(),
+        Lang::En => "Scanning".to_string(),
+    }
+}
+
+pub fn scan_indexing_label() -> String {
+    match lang() {
+        Lang::Ko => "인덱싱 중".to_string(),
+        Lang::En => "Indexing".to_string(),
     }
 }
 

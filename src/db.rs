@@ -641,6 +641,39 @@ impl SessionDb {
         Ok(rows)
     }
 
+    /// 시간 버킷 집계용 세션 상세: (date, session_id, total_tokens, first_user_prompt)
+    pub fn session_detail_window(
+        &self,
+        days: u64,
+    ) -> Result<Vec<(Option<String>, String, i64, Option<String>)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT date, session_id, total_tokens, first_user_prompt \
+             FROM sessions WHERE date >= ?1 ORDER BY date"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        }).map_err(|e| Error::Sqlite(e))?
+          .collect::<rusqlite::Result<Vec<_>>>()
+          .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// 시간 버킷별 스킬 집계용: (date, tool_name, call_count)
+    pub fn tool_usage_with_dates(&self, days: u64) -> Result<Vec<(Option<String>, String, i64)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT s.date, u.tool_name, u.call_count FROM tool_usage u \
+             JOIN sessions s ON s.session_id = u.session_id WHERE s.date >= ?1"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        }).map_err(|e| Error::Sqlite(e))?
+          .collect::<rusqlite::Result<Vec<_>>>()
+          .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
     /// 트랜잭션 시작
     pub fn begin_transaction(&self) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])

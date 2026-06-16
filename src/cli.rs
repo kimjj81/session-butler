@@ -145,6 +145,10 @@ pub enum Commands {
         #[arg(short = 'n', long, default_value = "15")]
         top: usize,
 
+        /// Time-bucket granularity for the trend table
+        #[arg(long, value_enum, default_value_t = crate::insights::Granularity::Month)]
+        by: crate::insights::Granularity,
+
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -305,11 +309,11 @@ pub fn run(cli: Cli) -> Result<()> {
             archiver.show_stats(&sessions)?;
         }
 
-        Commands::Insights { days, top, json } => {
+        Commands::Insights { days, top, by, json } => {
             if backend_disabled(&config, Backend::Codex) {
                 return Ok(());
             }
-            crate::insights::run(config, days, top, json)?;
+            crate::insights::run(config, days, top, by, json)?;
         }
 
         Commands::Compact { days, dry_run, scan_sensitive } => {

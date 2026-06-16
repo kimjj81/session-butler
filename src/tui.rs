@@ -271,6 +271,7 @@ impl TuiApp {
                 command: Commands::Insights {
                     days: 0,
                     top: 15,
+                    by: crate::insights::Granularity::Month,
                     json: false,
                 },
                 args: vec![
@@ -287,6 +288,13 @@ impl TuiApp {
                         default_value: "15".to_string(),
                         value: "15".to_string(),
                         arg_type: ArgType::Number,
+                    },
+                    Arg {
+                        name: "by".to_string(),
+                        description: "버킷 단위 (day/week/month)".to_string(),
+                        default_value: "month".to_string(),
+                        value: "month".to_string(),
+                        arg_type: ArgType::Text,
                     },
                     Arg {
                         name: "json".to_string(),
@@ -608,8 +616,13 @@ impl TuiApp {
             Commands::Insights { .. } => {
                 let days = get_val("days").parse().unwrap_or(0);
                 let top = get_val("top").parse().unwrap_or(15);
+                let by = match get_val("by").as_str() {
+                    "day" => crate::insights::Granularity::Day,
+                    "week" => crate::insights::Granularity::Week,
+                    _ => crate::insights::Granularity::Month,
+                };
                 let json = get_val("json") == "true";
-                Commands::Insights { days, top, json }
+                Commands::Insights { days, top, by, json }
             }
             Commands::Compact { .. } => {
                 let days = get_val("days").parse().unwrap_or(0);

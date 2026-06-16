@@ -18,7 +18,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::io::{self};
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 /// 액션 타입
@@ -103,6 +103,8 @@ pub struct TuiApp {
     filter_text: String,
     show_help: bool,
     output_buffer: String,
+    // 실행 대기 중인 명령 — run_pending이 꺼내서 실행한다.
+    pending: Option<Commands>,
     // 입력값을 저장하는 별도 구조
     input_values: std::collections::HashMap<String, String>,
 }
@@ -375,6 +377,7 @@ impl TuiApp {
             filter_text: String::new(),
             show_help: false,
             output_buffer: String::new(),
+            pending: None,
             input_values: std::collections::HashMap::new(),
         }
     }
@@ -658,12 +661,35 @@ impl TuiApp {
         }
     }
 
+    /// 명령을 실행 큐에 넣는다. 실제 실행은 run_tui 루프가 run_pending으로
+    /// 꺼내서 수행한다 (그래야 실행 중에 TUI 제어가 가능하다).
     fn execute_command(&mut self, command: Commands) -> Result<()> {
+        self.pending = Some(command);
         self.state = TuiState::Running;
+        Ok(())
+    }
 
-        // CLI run (config 파일 → 환경변수 → 기본값; TUI의 config와 동일 출처)
+    /// 대기 중인 명령을 실행한다.
+    ///
+    /// TUI(대체 화면)를 잠시 내리고 진짜 터미널로 전환한 뒤 명령을 실행한다 —
+    /// 그래야 indicatif 진행률 바/스피너가 stderr로 실시간 그려진다.
+    /// stdout은 Results 패널 표시용으로 캡처하고, stderr(바/경고)는 라이브로
+    /// 보낸다. 끝나면 TUI로 복귀해 Results를 표시한다.
+    pub fn run_pending(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+        let Some(command) = self.pending.take() else {
+            // pending이 없는데 Running 상태로 들어온 경우 — 메뉴로 복귀해 무한루프 방지.
+            self.state = TuiState::MainMenu;
+            return;
+        };
+
+        // --- TUI 일시중단: 대체 화면 종료 + raw mode 해제 ---
+        let _ = disable_raw_mode();
+        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(io::stdout(), crossterm::cursor::Show);
+        let _ = io::stdout().flush();
+
         let cli = crate::cli::Cli {
-            command: command.clone(),
+            command,
             codex_sessions: None,
             hermes_sessions: None,
             codex_archive: None,
@@ -675,26 +701,24 @@ impl TuiApp {
             no_hermes: false,
         };
 
-        // stdout/stderr를 버퍼로 캡처 — TUI 레이아웃을 유지한 채 Results에 표시
-        use std::io::Read;
+        // stdout → Results용 캡처; stderr → 진짜 터미널(진행률 바/경고 라이브)
         let mut output = String::new();
         let result = {
-            let mut out_buf = gag::BufferRedirect::stdout()
-                .map_err(|e| Error::Other(format!("stdout 캡처 실패: {}", e)))?;
-            let mut err_buf = gag::BufferRedirect::stderr()
-                .map_err(|e| Error::Other(format!("stderr 캡처 실패: {}", e)))?;
+            use std::io::Read;
+            let mut out_buf = gag::BufferRedirect::stdout().ok();
             let r = crate::cli::run(cli);
-            let _ = out_buf.read_to_string(&mut output);
-            let mut err_out = String::new();
-            let _ = err_buf.read_to_string(&mut err_out);
-            if !err_out.is_empty() {
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&err_out);
+            if let Some(b) = &mut out_buf {
+                let _ = b.read_to_string(&mut output);
             }
             r
         };
+        let _ = io::stderr().flush();
+        let _ = io::stdout().flush();
+
+        // --- TUI 재개: 대체 화면 재진입 + raw mode + 전체 재그리기 ---
+        let _ = execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture);
+        let _ = enable_raw_mode();
+        let _ = terminal.clear();
 
         self.output_buffer = output;
         self.execution_results.push(ExecutionResult {
@@ -702,9 +726,7 @@ impl TuiApp {
             output: self.output_buffer.clone(),
             error: result.err().map(|e| e.to_string()),
         });
-
         self.state = TuiState::Results;
-        Ok(())
     }
 
     pub fn render(&mut self, f: &mut Frame) {
@@ -1083,7 +1105,7 @@ pub fn run_tui(config: Config) -> Result<()> {
         }
 
         if app.state == TuiState::Running {
-            app.state = TuiState::Results;
+            app.run_pending(&mut terminal);
         }
     };
 

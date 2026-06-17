@@ -9,27 +9,37 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-/// DB 경로 해석: 기본 상대경로(codex_index.sqlite)가 그대로면 dev 편의상
-/// CWD / 상위 / $HOME 에서 기존 인덱스를 찾아 절대경로로 보정한다.
+/// DB 경로 해석: GUI는 Config 경로와 무관하게 **항상 저장소 밖(app-data)의 자체
+/// DB**를 쓴다. 이유 — Config::load()/from_file 이 상대경로를 CWD 기준 절대화하는데,
+/// `tauri dev` 의 CWD는 `gui/src-tauri`(파일 감시 대상)라 그 안의 SQLite WAL 파일
+/// (-shm/-wal)이 변경되면 앱 재빌드 무한 루프를 일으킨다. 명시적 CODEX_INDEX_DB
+/// 환경변수가 있을 때만 그 값을 그대로 쓴다(테스트/커스텀 경로용).
 fn resolve_db(mut config: Config) -> Config {
-    let p = &config.codex_index_db;
-    if !p.exists() && !p.is_absolute() {
-        let name = p
-            .file_name()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("codex_index.sqlite"));
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let home = std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
-        for c in [cwd.join(&name), cwd.join("..").join(&name), home.join(&name)] {
-            if c.exists() {
-                config.codex_index_db = c;
-                break;
-            }
+    if let Ok(p) = std::env::var("CODEX_INDEX_DB") {
+        if !p.trim().is_empty() {
+            config.codex_index_db = std::path::PathBuf::from(p);
+            return config;
         }
     }
+    let dir = app_data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    config.codex_index_db = dir.join("index.sqlite");
     config
+}
+
+/// 앱 데이터 디렉토리(저장소 밖). mac: ~/Library/Application Support/session-butler
+fn app_data_dir() -> std::path::PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        return std::path::PathBuf::from(xdg).join("session-butler");
+    }
+    let sub: &str = match std::env::consts::OS {
+        "macos" => "Library/Application Support/session-butler",
+        "windows" => "AppData/Roaming/session-butler",
+        _ => ".local/share/session-butler",
+    };
+    std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(sub))
+        .unwrap_or_else(|_| std::env::temp_dir().join("session-butler"))
 }
 
 fn load_config() -> Config {
@@ -142,4 +152,37 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![get_insights, scan])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Config::load() 가 config.json 유무와 무관하게 CWD-절대경로를 만들어도
+    /// GUI는 항상 app-data(저장소 밖)로 재배치해야 한다 — tauri dev 감시 루프 방지.
+    #[test]
+    fn resolve_db_always_relocates_outside_repo() {
+        // config.json 로드 후 expand_path 가 만드는 것과 같은 CWD 기반 절대경로 시뮬레이션
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut cfg = Config::new();
+        cfg.codex_index_db = cwd.join("./codex_index.sqlite");
+        assert!(cfg.codex_index_db.is_absolute(), "전제: Config가 절대경로로 만듦");
+
+        let resolved = resolve_db(cfg);
+        assert!(
+            resolved.codex_index_db.is_absolute(),
+            "절대경로여야 함: {:?}",
+            resolved.codex_index_db
+        );
+        assert!(
+            !resolved.codex_index_db.starts_with(&cwd),
+            "CWD(감시 대상 src-tauri 포함) 밖이어야 함: {:?}",
+            resolved.codex_index_db
+        );
+        assert!(
+            resolved.codex_index_db.ends_with("index.sqlite"),
+            "app-data index.sqlite 여야 함: {:?}",
+            resolved.codex_index_db
+        );
+    }
 }

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2535"/>
+      <stop offset="1" stop-color="#13201a"/>
+    </linearGradient>
+    <linearGradient id="bar1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4a82f5"/>
+      <stop offset="1" stop-color="#2f6fed"/>
+    </linearGradient>
+  </defs>
+  <!-- squircle background -->
+  <rect width="1024" height="1024" rx="228" ry="228" fill="url(#bg)"/>
+  <!-- subtle top highlight -->
+  <rect x="120" y="96" width="784" height="12" rx="6" fill="#ffffff" opacity="0.05"/>
+  <!-- butler bowtie nod -->
+  <g transform="translate(512 252)" fill="#cbd2d8">
+    <path d="M-52 -36 L-10 0 L-52 36 Z"/>
+    <path d="M52 -36 L10 0 L52 36 Z"/>
+    <rect x="-10" y="-13" width="20" height="26" rx="5"/>
+  </g>
+  <!-- session log bars (analytics) -->
+  <rect x="232" y="368" width="560" height="84" rx="42" fill="url(#bar1)"/>
+  <rect x="232" y="492" width="408" height="84" rx="42" fill="#3aa0e0"/>
+  <rect x="232" y="616" width="288" height="84" rx="42" fill="#2a9c62"/>
+</svg>

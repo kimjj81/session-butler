@@ -5,6 +5,7 @@
     type Report, type ScanProgress,
   } from "$lib/api";
   import Archive from "$lib/views/Archive.svelte";
+  import Chart from "$lib/Chart.svelte";
   import Restore from "$lib/views/Restore.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Summarize from "$lib/views/Summarize.svelte";
@@ -72,8 +73,30 @@
     }
   }
 
-  function maxOf(arr: { calls?: number; sessions?: number }[]): number {
-    return Math.max(...arr.map((x) => x.calls ?? x.sessions ?? 0), 1);
+  // ---- Chart.js 데이터 ----
+  const BAR = "#2f6fed";
+  const xGrid = { display: false } as const;
+  const yGrid = { color: "#22282e" } as const;
+  const noLegend = { legend: { display: false } } as const;
+  const horizontalBarOpts = { indexAxis: "y" as const, plugins: noLegend, scales: { x: { grid: yGrid }, y: { grid: xGrid } } };
+  const barOpts = { plugins: noLegend, scales: { x: { grid: xGrid }, y: { grid: yGrid } } };
+  const lineOpts = { plugins: noLegend, scales: { x: { grid: xGrid }, y: { grid: yGrid } } };
+
+  function toolsData() {
+    const t = report?.top_tools ?? [];
+    return { labels: t.map((x) => x.tool), datasets: [{ data: t.map((x) => x.calls), backgroundColor: BAR, borderRadius: 4 }] };
+  }
+  function weekdayData() {
+    const w = report?.activity_by_weekday ?? [];
+    return { labels: w.map((x) => x.weekday), datasets: [{ data: w.map((x) => x.sessions), backgroundColor: BAR, borderRadius: 4 }] };
+  }
+  function trendData() {
+    // 버킷은 내림차순(최근 위) → 시간순 좌→우 로 reverse
+    const b = [...(report?.time_buckets ?? [])].reverse();
+    return {
+      labels: b.map((x) => x.label),
+      datasets: [{ label: "세션", data: b.map((x) => x.sessions), borderColor: BAR, backgroundColor: "rgba(47,111,237,0.15)", tension: 0.3, fill: true, pointRadius: 2 }],
+    };
   }
 
   onMount(load);
@@ -159,15 +182,13 @@
       <section>
         <h2>자주 쓴 tool/skill (top {report.top_tools.length})</h2>
         {#if report.top_tools.length === 0}<p class="muted">없음</p>{:else}
-        <ul class="ranking">
-          {#each report.top_tools as t}
-            <li>
-              <span class="name" title={t.tool}>{t.tool}</span>
-              <span class="track"><span class="meter" style="width:{(t.calls / maxOf(report.top_tools) * 100)}%"></span></span>
-              <span class="num">{fmtInt(t.calls)}</span>
-            </li>
-          {/each}
-        </ul>
+        <Chart type="bar" data={toolsData()} options={horizontalBarOpts} height={Math.min(360, report.top_tools.length * 24 + 30)} />
+        <details class="exact">
+          <summary>정확한 수치 ({report.top_tools.length})</summary>
+          <ul class="kv">
+            {#each report.top_tools as t}<li><span class="mono" title={t.tool}>{t.tool}</span><span class="num">{fmtInt(t.calls)}</span></li>{/each}
+          </ul>
+        </details>
         {/if}
       </section>
 
@@ -188,15 +209,13 @@
       <section>
         <h2>요일별 활동</h2>
         {#if report.activity_by_weekday.length === 0}<p class="muted">없음</p>{:else}
-        <ul class="ranking">
-          {#each report.activity_by_weekday as w}
-            <li>
-              <span class="name">{w.weekday}</span>
-              <span class="track"><span class="meter" style="width:{(w.sessions / maxOf(report.activity_by_weekday) * 100)}%"></span></span>
-              <span class="num">{fmtInt(w.sessions)}</span>
-            </li>
-          {/each}
-        </ul>
+        <Chart type="bar" data={weekdayData()} options={barOpts} height={200} />
+        <details class="exact">
+          <summary>정확한 수치</summary>
+          <ul class="kv">
+            {#each report.activity_by_weekday as w}<li><span>{w.weekday}</span><span class="num">{fmtInt(w.sessions)}</span></li>{/each}
+          </ul>
+        </details>
         {/if}
       </section>
 
@@ -222,6 +241,7 @@
     <section>
       <h2>시간 버킷 추세 ({by})</h2>
       {#if report.time_buckets.length === 0}<p class="muted">없음</p>{:else}
+      <div class="trend"><Chart type="line" data={trendData()} options={lineOpts} height={200} /></div>
       <table class="buckets">
         <thead><tr><th>구간</th><th class="r">세션</th><th class="r">토큰</th><th>대표 스킬</th><th>최빈 단어</th></tr></thead>
         <tbody>
@@ -304,12 +324,13 @@
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   section { background: #1b2026; border: 1px solid #262d34; border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
   h2 { font-size: 14px; margin: 0 0 10px; color: #c9ced3; }
-  ul.ranking { list-style: none; margin: 0; padding: 0; }
-  ul.ranking li { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 5px; }
-  .name { width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; }
-  .track { flex: 1; height: 10px; background: #14181c; border-radius: 4px; overflow: hidden; }
-  .meter { display: block; height: 100%; background: #2f6fed; }
   .num { width: 70px; text-align: right; color: #9aa1a8; font-variant-numeric: tabular-nums; }
+  .exact { margin-top: 10px; font-size: 12px; color: #9aa1a8; }
+  .exact > summary { cursor: pointer; list-style: none; }
+  .exact > summary::before { content: "▸ "; }
+  .exact[open] > summary::before { content: "▾ "; }
+  .kv { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; }
+  .kv li { display: contents; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; color: #9aa1a8; font-weight: 500; padding: 4px 6px; border-bottom: 1px solid #2c333b; }
   td { padding: 4px 6px; border-bottom: 1px solid #22282e; }
@@ -320,6 +341,7 @@
   .lead-top { display: flex; gap: 8px; align-items: baseline; }
   .lead-prompt { color: #9aa1a8; font-size: 12px; margin-top: 2px; }
   .buckets td.words { color: #c9ced3; }
+  .trend { margin-bottom: 12px; }
   .word-section { margin-bottom: 10px; }
   .word-cat { font-size: 12px; color: #9aa1a8; margin-bottom: 4px; }
   .word-cloud { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }

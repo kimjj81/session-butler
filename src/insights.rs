@@ -90,22 +90,39 @@ impl WordsSource {
     }
 }
 
-/// 인사이트 리포트 진입점.
+/// 인사이트 리포트 진입점(CLI). 데이터는 build_report로, 출력은 여기서.
 pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool, words: WordsSource) -> Result<()> {
+    match build_report(&config, days, top, by, words)? {
+        None => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"empty": true}))
+                        .map_err(Error::Json)?
+                );
+            } else {
+                println!("{}", i18n::insights_empty());
+            }
+        }
+        Some(report) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report).map_err(Error::Json)?);
+            } else {
+                render_text(&report);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 인덱스된 DB에서 인사이트 리포트를 구성해 반환(GUI/CLI 공용).
+/// 세션이 없으면 None.
+pub fn build_report(config: &Config, days: u64, top: usize, by: Granularity, words: WordsSource) -> Result<Option<Report>> {
     let db = SessionDb::new(&config.codex_index_db)?;
     let limit = top as i64;
 
     if db.count_sessions()? == 0 {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({"empty": true}))
-                    .map_err(Error::Json)?
-            );
-        } else {
-            println!("{}", i18n::insights_empty());
-        }
-        return Ok(());
+        return Ok(None);
     }
 
     let token_re = Regex::new(r"[A-Za-z0-9_가-힣./-]{2,}")
@@ -170,13 +187,7 @@ pub fn run(config: Config, days: u64, top: usize, by: Granularity, json: bool, w
         }).collect(),
     };
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report).map_err(Error::Json)?);
-        return Ok(());
-    }
-
-    render_text(&report);
-    Ok(())
+    Ok(Some(report))
 }
 
 fn map_tools(v: Vec<(String, i64)>) -> Vec<ToolStat> {
@@ -535,7 +546,7 @@ fn truncate(s: &str, limit: usize) -> String {
 // ---- 직렬화 구조체 ----
 
 #[derive(Serialize)]
-struct Report {
+pub struct Report {
     window_days: u64,
     granularity: Granularity,
     /// 단어 분석 소스 ("all"|"conversation"|"reasoning"|"tools"|"first-prompt")
@@ -554,65 +565,65 @@ struct Report {
 }
 
 #[derive(Serialize)]
-struct WordSection {
-    category: String,
-    words: Vec<WordStat>,
+pub struct WordSection {
+    pub category: String,
+    pub words: Vec<WordStat>,
 }
 
 #[derive(Serialize)]
-struct Overview {
-    sessions: i64,
-    total_tokens: i64,
-    total_tool_calls: i64,
-    total_file_changes: i64,
-    distinct_projects: i64,
-    distinct_tools: i64,
-    archived: i64,
-    date_from: Option<String>,
-    date_to: Option<String>,
+pub struct Overview {
+    pub sessions: i64,
+    pub total_tokens: i64,
+    pub total_tool_calls: i64,
+    pub total_file_changes: i64,
+    pub distinct_projects: i64,
+    pub distinct_tools: i64,
+    pub archived: i64,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
 }
 
 #[derive(Serialize)]
-struct ToolStat {
-    tool: String,
-    calls: i64,
+pub struct ToolStat {
+    pub tool: String,
+    pub calls: i64,
 }
 
 #[derive(Serialize)]
-struct ProjectStat {
-    repo: String,
-    sessions: i64,
-    tokens: i64,
+pub struct ProjectStat {
+    pub repo: String,
+    pub sessions: i64,
+    pub tokens: i64,
 }
 
 #[derive(Serialize)]
-struct TimeBucket {
-    label: String,
-    sessions: i64,
-    tokens: i64,
-    top_skill: Option<String>,
-    top_skill_calls: i64,
-    top_words: Vec<String>,
+pub struct TimeBucket {
+    pub label: String,
+    pub sessions: i64,
+    pub tokens: i64,
+    pub top_skill: Option<String>,
+    pub top_skill_calls: i64,
+    pub top_words: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct WeekdayStat {
-    weekday: String,
-    weekday_index: i64,
-    sessions: i64,
+pub struct WeekdayStat {
+    pub weekday: String,
+    pub weekday_index: i64,
+    pub sessions: i64,
 }
 
 #[derive(Serialize)]
-struct WordStat {
-    word: String,
-    count: i64,
+pub struct WordStat {
+    pub word: String,
+    pub count: i64,
 }
 
 #[derive(Serialize)]
-struct SessionStat {
-    session_id: String,
-    date: Option<String>,
-    tokens: i64,
-    tool_calls: i64,
-    prompt: Option<String>,
+pub struct SessionStat {
+    pub session_id: String,
+    pub date: Option<String>,
+    pub tokens: i64,
+    pub tool_calls: i64,
+    pub prompt: Option<String>,
 }

@@ -4,12 +4,14 @@ use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::i18n;
+use crate::progress::{Progress, TerminalProgress};
 use crate::types::CodexSessionMeta;
 use crate::util;
 use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// 단어 빈도 분석용 토큰 정규식 (summary::tokenize_words와 쌍).
@@ -18,20 +20,20 @@ const TOKEN_RE: &str = r"[A-Za-z0-9_가-힣./-]{2,}";
 /// Codex 세션 스캐너
 pub struct CodexScanner {
     config: Config,
-    progress: bool,
+    progress: Arc<dyn Progress>,
 }
 
 impl CodexScanner {
-    /// 새 스캐너 생성
+    /// 새 스캐너 생성 (진행률 = 터미널 indicatif)
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            progress: true,
+            progress: Arc::new(TerminalProgress),
         }
     }
 
-    /// 진행률 표시 설정
-    pub fn with_progress(mut self, progress: bool) -> Self {
+    /// 진행률 구현체 주입 (GUI는 EventProgress, 테스트/캡처는 NoopProgress)
+    pub fn with_progress(mut self, progress: Arc<dyn Progress>) -> Self {
         self.progress = progress;
         self
     }
@@ -61,13 +63,10 @@ impl CodexScanner {
             .collect();
 
         let total_files = files.len();
-        if self.progress {
-            println!("{}", i18n::scan_found(total_files));
-        }
+        println!("{}", i18n::scan_found(total_files));
 
-        // 진행률 바 (터미널일 때만 표시; TUI gag/파이프는 hidden)
-        let visible = self.progress && std::io::IsTerminal::is_terminal(&std::io::stderr());
-        let pb = crate::progress::bar_if(total_files as u64, &i18n::scan_progress_label(), self.progress);
+        // 진행률 바 — 주입된 Progress 구현체에 따라 터미널(indicatif) 또는 이벤트(GUI).
+        let pb = self.progress.bar(total_files as u64, &i18n::scan_progress_label());
 
         // 단어 토크나이저(대화 본문 집계용) — 파일마다 재컴파일하지 않도록 1회 컴파일.
         let token_re = Regex::new(TOKEN_RE)
@@ -81,19 +80,13 @@ impl CodexScanner {
                 Ok(meta) => results.push(meta),
                 Err(e) => {
                     let msg = format!("  ERROR processing {}: {}", path.display(), e);
-                    if visible {
-                        pb.println(msg);
-                    } else {
-                        eprintln!("{}", msg);
-                    }
+                    eprintln!("{}", msg);
                 }
             }
         }
         pb.finish();
 
-        if self.progress {
-            println!("{}", i18n::scan_scanned(results.len()));
-        }
+        println!("{}", i18n::scan_scanned(results.len()));
 
         Ok(results)
     }
@@ -341,7 +334,7 @@ impl CodexScanner {
     pub fn index_sessions(&self, metas: Vec<CodexSessionMeta>) -> Result<()> {
         let db = SessionDb::new(&self.config.codex_index_db)?;
 
-        let pb = crate::progress::spinner(&i18n::scan_indexing_label());
+        let pb = self.progress.spinner(&i18n::scan_indexing_label());
         db.begin_transaction()?;
 
         for meta in &metas {
@@ -355,9 +348,7 @@ impl CodexScanner {
         drop(db);
         pb.finish();
 
-        if self.progress {
-            println!("{}", i18n::scan_indexed(metas.len(), &self.config.codex_index_db.display().to_string()));
-        }
+        println!("{}", i18n::scan_indexed(metas.len(), &self.config.codex_index_db.display().to_string()));
 
         Ok(())
     }

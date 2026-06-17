@@ -6,6 +6,10 @@ description = "Codex/Hermes session file management tool"
 authors = ["Kim Jeongjin"]
 license = "MIT"
 
+[workspace]
+resolver = "2"
+members = ["gui/src-tauri"]
+
 [dependencies]
 # TUI framework
 ratatui = { version = "0.29", features = ["all-widgets"] }

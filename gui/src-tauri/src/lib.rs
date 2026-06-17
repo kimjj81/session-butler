@@ -1,10 +1,14 @@
 // Tauri 커맨드 — session-butler 라이브러리 호출.
 // 읽기(insights)는 데이터 반환, 긴 작업(scan)은 spawn_blocking + 진행률 이벤트.
 
+use session_butler::archive::SessionArchiver;
+use session_butler::compact::SessionCompactor;
 use session_butler::config::Config;
+use session_butler::db::SessionDb;
 use session_butler::insights::{self, Granularity, Report, WordsSource};
 use session_butler::progress::{Bar, Progress};
 use session_butler::scanner::CodexScanner;
+use session_butler::types::{ArchivedSessionRow, SensitiveFile};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -69,30 +73,33 @@ struct ScanSummary {
     sessions: usize,
 }
 
-/// 진행률 → Tauri 이벤트("scan-progress")로 송출하는 Progress 구현체.
+/// 진행률 → Tauri 이벤트로 송출하는 Progress 구현체. `event` 로 커맨드별 채널 분리.
 struct EventProgress {
     app: AppHandle,
+    event: &'static str,
 }
 
 impl Progress for EventProgress {
     fn bar(&self, len: u64, msg: &str) -> Box<dyn Bar> {
         let _ = self.app.emit(
-            "scan-progress",
+            self.event,
             serde_json::json!({ "kind": "bar", "len": len, "msg": msg }),
         );
         Box::new(EventBar {
             app: self.app.clone(),
+            event: self.event,
             len,
         })
     }
 
     fn spinner(&self, msg: &str) -> Box<dyn Bar> {
         let _ = self.app.emit(
-            "scan-progress",
+            self.event,
             serde_json::json!({ "kind": "spinner", "msg": msg }),
         );
         Box::new(EventBar {
             app: self.app.clone(),
+            event: self.event,
             len: 0,
         })
     }
@@ -100,19 +107,20 @@ impl Progress for EventProgress {
 
 struct EventBar {
     app: AppHandle,
+    event: &'static str,
     len: u64,
 }
 
 impl Bar for EventBar {
     fn inc(&self, n: u64) {
         let _ = self.app.emit(
-            "scan-progress",
+            self.event,
             serde_json::json!({ "kind": "inc", "n": n, "len": self.len }),
         );
     }
 
     fn finish(&self) {
-        let _ = self.app.emit("scan-progress", serde_json::json!({ "kind": "finish" }));
+        let _ = self.app.emit(self.event, serde_json::json!({ "kind": "finish" }));
     }
 }
 
@@ -133,7 +141,7 @@ async fn get_insights(days: u64, top: usize, by: String, words: String) -> Resul
 #[tauri::command]
 async fn scan(app: AppHandle) -> Result<ScanSummary, String> {
     let config = load_config();
-    let progress: Arc<dyn Progress> = Arc::new(EventProgress { app });
+    let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "scan-progress" });
     tauri::async_runtime::spawn_blocking(move || {
         let scanner = CodexScanner::new(config).with_progress(progress);
         let metas = scanner.scan_all().map_err(|e| e.to_string())?;
@@ -145,11 +153,126 @@ async fn scan(app: AppHandle) -> Result<ScanSummary, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+struct ArchiveSummary {
+    archived: usize,
+    skipped: usize,
+    total_original: u64,
+    total_compressed: u64,
+}
+
+/// 보존기간(days)보다 오래된 세션을 zstd 압축. 진행률: "archive-progress".
+#[tauri::command]
+async fn archive(app: AppHandle, days: u64, dry_run: bool, move_originals: bool) -> Result<ArchiveSummary, String> {
+    let config = load_config();
+    let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "archive-progress" });
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = SessionDb::new(&config.codex_index_db).map_err(|e| e.to_string())?;
+        // 파괴적 archive 전에 DB를 디스크와 동기화(scan). app-data DB 가 비어있거나
+        // 오래된 상태에서 move_originals=true 가 되면, mark_archived 실패 후에도
+        // 원본이 이미 삭제돼 복구 불가 상태가 되는 데이터 손실(Codex 리뷰 P1)을 막는다.
+        let scanner = CodexScanner::new(config.clone()).with_progress(progress.clone());
+        let metas = scanner.scan_all().map_err(|e| e.to_string())?;
+        scanner.index_sessions(metas).map_err(|e| e.to_string())?;
+        let archiver = SessionArchiver::new(config).with_progress(progress);
+        let sessions = archiver.discover_sessions().map_err(|e| e.to_string())?;
+        let old = archiver.filter_by_days(&sessions, days);
+        let res = archiver.archive(&old, dry_run, move_originals, &db).map_err(|e| e.to_string())?;
+        Ok::<ArchiveSummary, String>(ArchiveSummary {
+            archived: res.archived.len(),
+            skipped: res.skipped.len(),
+            total_original: res.total_original,
+            total_compressed: res.total_compressed,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 보관된(archived) 세션 목록(restore 표시용).
+#[tauri::command]
+async fn list_archived() -> Result<Vec<ArchivedSessionRow>, String> {
+    let config = load_config();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = SessionDb::new(&config.codex_index_db).map_err(|e| e.to_string())?;
+        db.list_archived().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+struct RestoreSummary {
+    restored: usize,
+}
+
+/// 보관 세션 전체 복원. 진행률: "restore-progress".
+#[tauri::command]
+async fn restore(app: AppHandle, dry_run: bool, purge: bool) -> Result<RestoreSummary, String> {
+    let config = load_config();
+    let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "restore-progress" });
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = SessionDb::new(&config.codex_index_db).map_err(|e| e.to_string())?;
+        let rows = db.list_archived().map_err(|e| e.to_string())?;
+        let archiver = SessionArchiver::new(config).with_progress(progress);
+        let restored = archiver.restore(&rows, dry_run, purge, &db).map_err(|e| e.to_string())?;
+        Ok::<RestoreSummary, String>(RestoreSummary { restored: restored.len() })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+struct CompactSummary {
+    moved: usize,
+    skipped: usize,
+    total: usize,
+}
+
+/// 오래된 세션 compaction(trash 이동). 진행률: "compact-progress".
+#[tauri::command]
+async fn compact(app: AppHandle, days: u64, dry_run: bool) -> Result<CompactSummary, String> {
+    let config = load_config();
+    let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "compact-progress" });
+    tauri::async_runtime::spawn_blocking(move || {
+        let compactor = SessionCompactor::new(config).map_err(|e| e.to_string())?.with_progress(progress);
+        let res = compactor.compact_sessions(days, dry_run).map_err(|e| e.to_string())?;
+        Ok::<CompactSummary, String>(CompactSummary {
+            moved: res.moved.len(),
+            skipped: res.skipped.len(),
+            total: res.total,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 민감정보(.env/token/key) 포함 세션 탐지. 진행률: "scan-sensitive-progress".
+#[tauri::command]
+async fn scan_sensitive(app: AppHandle) -> Result<Vec<SensitiveFile>, String> {
+    let config = load_config();
+    let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "scan-sensitive-progress" });
+    tauri::async_runtime::spawn_blocking(move || {
+        let compactor = SessionCompactor::new(config).map_err(|e| e.to_string())?.with_progress(progress);
+        compactor.discover_sensitive_files().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_insights, scan])
+        .invoke_handler(tauri::generate_handler![
+            get_insights,
+            scan,
+            archive,
+            list_archived,
+            restore,
+            compact,
+            scan_sensitive
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -4,6 +4,11 @@
     getInsights, runScan, fmtInt,
     type Report, type ScanProgress,
   } from "$lib/api";
+  import Archive from "$lib/views/Archive.svelte";
+  import Restore from "$lib/views/Restore.svelte";
+  import Compact from "$lib/views/Compact.svelte";
+
+  let tab = $state<"dashboard" | "archive" | "restore" | "compact">("dashboard");
 
   let report = $state<Report | null>(null);
   let loading = $state(false);
@@ -114,6 +119,13 @@
     {/if}
   </header>
 
+  <nav class="tabs">
+    {#each [["dashboard", "대시보드"], ["archive", "Archive"], ["restore", "Restore"], ["compact", "Compact"]] as [id, label]}
+      <button class:active={tab === id} onclick={() => (tab = id as typeof tab)}>{label}</button>
+    {/each}
+  </nav>
+
+  {#if tab === "dashboard"}
   {#if error}
     <div class="error">오류: {error}</div>
   {/if}
@@ -241,6 +253,13 @@
       {/each}
     </section>
   {/if}
+  {:else if tab === "archive"}
+    <Archive />
+  {:else if tab === "restore"}
+    <Restore />
+  {:else if tab === "compact"}
+    <Compact />
+  {/if}
 </main>
 
 <style>
@@ -251,6 +270,9 @@
   }
   main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
   header h1 { margin: 0 0 12px; font-size: 22px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 1px solid #262d34; padding-bottom: 8px; }
+  .tabs button { background: transparent; border: none; color: #9aa1a8; padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 13px; }
+  .tabs button.active { color: #e6e8eb; background: #1b2026; }
   .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
   .controls label { display: flex; flex-direction: column; font-size: 12px; color: #9aa1a8; gap: 4px; }
   input, select {

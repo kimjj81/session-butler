@@ -70,6 +70,91 @@ export async function runScan(onProgress: (p: ScanProgress) => void): Promise<Sc
   }
 }
 
+// ---- Phase 2: archive / restore / compact ----
+
+/** 진행률 이벤트 채널명(커맨드별). */
+export const PROGRESS_EVENTS = {
+  scan: "scan-progress",
+  archive: "archive-progress",
+  restore: "restore-progress",
+  compact: "compact-progress",
+  scanSensitive: "scan-sensitive-progress",
+} as const;
+
+export interface ArchivedRow {
+  session_id: string;
+  path: string;
+  date: string | null;
+  compressed_path: string;
+  checksum_sha256: string;
+}
+export interface SensitiveFile {
+  path: string;
+  date: string | null;
+  size_bytes: number;
+  patterns: string[];
+}
+export interface ArchiveSummary {
+  archived: number; skipped: number; total_original: number; total_compressed: number;
+}
+export interface RestoreSummary { restored: number; }
+export interface CompactSummary { moved: number; skipped: number; total: number; }
+
+/** 진행률 이벤트를 수신하며 명령 실행. */
+async function runWithProgress<T>(
+  event: string,
+  cmd: string,
+  args: Record<string, unknown>,
+  onProgress?: (p: ScanProgress) => void,
+): Promise<T> {
+  let unlisten: UnlistenFn | undefined;
+  if (onProgress) {
+    try {
+      unlisten = await listen<ScanProgress>(event, (e) => onProgress(e.payload));
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    return await invoke<T>(cmd, args);
+  } finally {
+    unlisten?.();
+  }
+}
+
+export const runArchive = (
+  days: number, dryRun: boolean, moveOriginals: boolean,
+  onProgress?: (p: ScanProgress) => void,
+) => runWithProgress<ArchiveSummary>(
+  PROGRESS_EVENTS.archive, "archive",
+  { days, dryRun, moveOriginals }, onProgress,
+);
+
+export const listArchived = () => invoke<ArchivedRow[]>("list_archived");
+
+export const runRestore = (
+  dryRun: boolean, purge: boolean,
+  onProgress?: (p: ScanProgress) => void,
+) => runWithProgress<RestoreSummary>(
+  PROGRESS_EVENTS.restore, "restore",
+  { dryRun, purge }, onProgress,
+);
+
+export const runCompact = (
+  days: number, dryRun: boolean,
+  onProgress?: (p: ScanProgress) => void,
+) => runWithProgress<CompactSummary>(
+  PROGRESS_EVENTS.compact, "compact",
+  { days, dryRun }, onProgress,
+);
+
+export const runScanSensitive = (
+  onProgress?: (p: ScanProgress) => void,
+) => runWithProgress<SensitiveFile[]>(
+  PROGRESS_EVENTS.scanSensitive, "scan_sensitive",
+  {}, onProgress,
+);
+
 export function fmtInt(n: number): string {
   return n.toLocaleString("en-US");
 }

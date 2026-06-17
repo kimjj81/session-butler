@@ -3,23 +3,32 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::i18n;
+use crate::progress::{Progress, TerminalProgress};
 use crate::types::SensitiveFile;
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// Hermes 세션 컴팩터
 pub struct SessionCompactor {
     config: Config,
     patterns: Vec<Regex>,
+    progress: Arc<dyn Progress>,
 }
 
 impl SessionCompactor {
-    /// 새 컴팩터 생성
+    /// 새 컴팩터 생성 (진행률 = 터미널 indicatif)
     pub fn new(config: Config) -> Result<Self> {
         let patterns = Self::default_patterns()?;
-        Ok(Self { config, patterns })
+        Ok(Self { config, patterns, progress: Arc::new(TerminalProgress) })
+    }
+
+    /// 진행률 구현체 주입 (GUI: EventProgress)
+    pub fn with_progress(mut self, progress: Arc<dyn Progress>) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// 기본 민감정보 패턴
@@ -99,7 +108,7 @@ impl SessionCompactor {
     pub fn discover_sensitive_files(&self) -> Result<Vec<SensitiveFile>> {
         let mut results = Vec::new();
 
-        let pb = crate::progress::spinner(&i18n::scan_sensitive_progress_label());
+        let pb = self.progress.spinner(&i18n::scan_sensitive_progress_label());
 
         for entry in WalkDir::new(&self.config.hermes_sessions)
             .follow_links(false)
@@ -208,7 +217,7 @@ impl SessionCompactor {
         let mut moved = Vec::new();
         let mut skipped = Vec::new();
 
-        let pb = crate::progress::bar(old_sessions.len() as u64, &i18n::compact_progress_label());
+        let pb = self.progress.bar(old_sessions.len() as u64, &i18n::compact_progress_label());
 
         for path in &old_sessions {
             pb.inc(1);

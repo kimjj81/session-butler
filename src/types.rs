@@ -96,7 +96,7 @@ pub struct ArchivedSession {
 }
 
 /// DB에서 읽어온 archived 세션 (restore 대상)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ArchivedSessionRow {
     pub session_id: String,
     /// 원본 jsonl 경로 = 복원 대상

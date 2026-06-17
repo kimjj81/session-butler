@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::i18n;
+use crate::progress::{Progress, TerminalProgress};
 use crate::types::{ArchivedSession, ArchivedSessionRow, SessionInfo};
 use crate::util;
 use chrono::Datelike;
@@ -11,6 +12,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use walkdir::WalkDir;
 use zstd::stream::Encoder;
 
@@ -18,6 +20,7 @@ use zstd::stream::Encoder;
 pub struct SessionArchiver {
     config: Config,
     compression_level: i32,
+    progress: Arc<dyn Progress>,
 }
 
 impl SessionArchiver {
@@ -26,7 +29,14 @@ impl SessionArchiver {
         Self {
             config,
             compression_level: 3, // zstd level 3 for speed/good ratio
+            progress: Arc::new(TerminalProgress),
         }
+    }
+
+    /// 진행률 구현체 주입 (GUI: EventProgress)
+    pub fn with_progress(mut self, progress: Arc<dyn Progress>) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// 압축 레벨 설정
@@ -158,7 +168,7 @@ impl SessionArchiver {
         let mut total_original = 0u64;
         let mut total_compressed = 0u64;
 
-        let pb = crate::progress::bar(sessions.len() as u64, &i18n::archive_progress_label());
+        let pb = self.progress.bar(sessions.len() as u64, &i18n::archive_progress_label());
 
         for session in sessions {
             pb.inc(1);
@@ -389,7 +399,7 @@ impl SessionArchiver {
     pub fn restore(&self, rows: &[ArchivedSessionRow], dry_run: bool, purge: bool, db: &SessionDb) -> Result<Vec<ArchivedSessionRow>> {
         let mut restored = Vec::new();
 
-        let pb = crate::progress::bar(rows.len() as u64, &i18n::restore_progress_label());
+        let pb = self.progress.bar(rows.len() as u64, &i18n::restore_progress_label());
 
         for row in rows {
             pb.inc(1);

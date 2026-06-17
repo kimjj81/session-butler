@@ -8,7 +8,7 @@ use session_butler::db::SessionDb;
 use session_butler::insights::{self, Granularity, Report, WordsSource};
 use session_butler::progress::{Bar, Progress};
 use session_butler::scanner::CodexScanner;
-use session_butler::types::{ArchivedSessionRow, SensitiveFile};
+use session_butler::types::{ArchivedSessionRow, SessionInfo, SensitiveFile};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -175,8 +175,10 @@ async fn archive(app: AppHandle, days: u64, dry_run: bool, move_originals: bool)
         let metas = scanner.scan_all().map_err(|e| e.to_string())?;
         scanner.index_sessions(metas).map_err(|e| e.to_string())?;
         let archiver = SessionArchiver::new(config).with_progress(progress);
-        let sessions = archiver.discover_sessions().map_err(|e| e.to_string())?;
-        let old = archiver.filter_by_days(&sessions, days);
+        // DB 기반 보관 대상 선정: date < cutoff 이고 미보관(archived=0).
+        // (filter_by_days 는 조회용 '최근 N일' 필터라 방향이 반대 — Codex 리뷰 P1.)
+        let candidates = db.list_archive_candidates(days).map_err(|e| e.to_string())?;
+        let old: Vec<&SessionInfo> = candidates.iter().collect();
         let res = archiver.archive(&old, dry_run, move_originals, &db).map_err(|e| e.to_string())?;
         Ok::<ArchiveSummary, String>(ArchiveSummary {
             archived: res.archived.len(),

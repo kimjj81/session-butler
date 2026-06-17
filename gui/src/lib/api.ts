@@ -155,6 +155,38 @@ export const runScanSensitive = (
   {}, onProgress,
 );
 
+// ---- Phase 3: summarize / settings ----
+
+export const runSummarize = (summaryOnly: boolean, ftsOnly: boolean) =>
+  invoke<void>("summarize", { summaryOnly, ftsOnly });
+
+export interface ConfigView {
+  codex_sessions: string;
+  hermes_sessions: string;
+  default_archive_days: number;
+  enabled_codex: boolean;
+  enabled_hermes: boolean;
+  language: string;
+}
+
+export const getConfig = () => invoke<ConfigView>("get_config");
+
+export function setConfig(patch: {
+  codex_sessions?: string;
+  default_archive_days?: number;
+  enabled_codex?: boolean;
+  enabled_hermes?: boolean;
+  language?: string;
+}): Promise<void> {
+  return invoke<void>("set_config", {
+    codexSessions: patch.codex_sessions,
+    defaultArchiveDays: patch.default_archive_days,
+    enabledCodex: patch.enabled_codex,
+    enabledHermes: patch.enabled_hermes,
+    language: patch.language,
+  });
+}
+
 export function fmtInt(n: number): string {
   return n.toLocaleString("en-US");
 }

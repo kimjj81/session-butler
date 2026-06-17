@@ -7,8 +7,10 @@
   import Archive from "$lib/views/Archive.svelte";
   import Restore from "$lib/views/Restore.svelte";
   import Compact from "$lib/views/Compact.svelte";
+  import Summarize from "$lib/views/Summarize.svelte";
+  import Settings from "$lib/views/Settings.svelte";
 
-  let tab = $state<"dashboard" | "archive" | "restore" | "compact">("dashboard");
+  let tab = $state<"dashboard" | "archive" | "restore" | "compact" | "summarize" | "settings">("dashboard");
 
   let report = $state<Report | null>(null);
   let loading = $state(false);
@@ -120,7 +122,7 @@
   </header>
 
   <nav class="tabs">
-    {#each [["dashboard", "대시보드"], ["archive", "Archive"], ["restore", "Restore"], ["compact", "Compact"]] as [id, label]}
+    {#each [["dashboard", "대시보드"], ["archive", "Archive"], ["restore", "Restore"], ["compact", "Compact"], ["summarize", "Summarize"], ["settings", "Settings"]] as [id, label]}
       <button class:active={tab === id} onclick={() => (tab = id as typeof tab)}>{label}</button>
     {/each}
   </nav>
@@ -259,6 +261,10 @@
     <Restore />
   {:else if tab === "compact"}
     <Compact />
+  {:else if tab === "summarize"}
+    <Summarize />
+  {:else if tab === "settings"}
+    <Settings />
   {/if}
 </main>
 

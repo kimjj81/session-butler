@@ -8,26 +8,30 @@ use session_butler::db::SessionDb;
 use session_butler::insights::{self, Granularity, Report, WordsSource};
 use session_butler::progress::{Bar, Progress};
 use session_butler::scanner::CodexScanner;
+use session_butler::summary::SummaryBuilder;
 use session_butler::types::{ArchivedSessionRow, SessionInfo, SensitiveFile};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-/// DB 경로 해석: GUI는 Config 경로와 무관하게 **항상 저장소 밖(app-data)의 자체
-/// DB**를 쓴다. 이유 — Config::load()/from_file 이 상대경로를 CWD 기준 절대화하는데,
-/// `tauri dev` 의 CWD는 `gui/src-tauri`(파일 감시 대상)라 그 안의 SQLite WAL 파일
-/// (-shm/-wal)이 변경되면 앱 재빌드 무한 루프를 일으킨다. 명시적 CODEX_INDEX_DB
-/// 환경변수가 있을 때만 그 값을 그대로 쓴다(테스트/커스텀 경로용).
-fn resolve_db(mut config: Config) -> Config {
-    if let Ok(p) = std::env::var("CODEX_INDEX_DB") {
-        if !p.trim().is_empty() {
-            config.codex_index_db = std::path::PathBuf::from(p);
-            return config;
-        }
-    }
+/// 쓰기 가능한 출력(DB/summary/fts5)을 저장소 밖 app-data 로 강제 재배치.
+/// 이유 — Config::load()/from_file 이 상대경로를 CWD 기준 절대화하는데, `tauri dev`
+/// 의 CWD 는 `gui/src-tauri`(파일 감시 대상)라 그 안 파일이 바뀌면 앱 재빌드 루프가
+/// 발생. is_absolute() 검사로는 Config 의 CWD-절대경로를 못 잡아 **무조건** 재배치.
+/// CODEX_INDEX_DB 환경변수가 있으면 DB 경로만 그 값으로(테스트/커스텀용).
+fn relocate_outputs(mut config: Config) -> Config {
     let dir = app_data_dir();
     let _ = std::fs::create_dir_all(&dir);
-    config.codex_index_db = dir.join("index.sqlite");
+    match std::env::var("CODEX_INDEX_DB") {
+        Ok(p) if !p.trim().is_empty() => {
+            config.codex_index_db = std::path::PathBuf::from(p);
+        }
+        _ => {
+            config.codex_index_db = dir.join("index.sqlite");
+        }
+    }
+    config.summary_layer = dir.join("summary_layer.json");
+    config.fts5_index = dir.join("fts5_index.json");
     config
 }
 
@@ -47,7 +51,7 @@ fn app_data_dir() -> std::path::PathBuf {
 }
 
 fn load_config() -> Config {
-    resolve_db(Config::load())
+    relocate_outputs(Config::load())
 }
 
 fn parse_granularity(s: &str) -> Granularity {
@@ -262,6 +266,93 @@ async fn scan_sensitive(app: AppHandle) -> Result<Vec<SensitiveFile>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Hermes/session_*.json 요약 + FTS5 인덱스 생성. summary_only/fts_only 로 부분 실행.
+#[tauri::command]
+async fn summarize(summary_only: bool, fts_only: bool) -> Result<(), String> {
+    let config = load_config();
+    // CLI 와 동일: Hermes 백엔드 비활성 시 실행하지 않는다(Codex 리뷰 P2).
+    if !config.enabled_hermes {
+        return Err("summary 백엔드가 비활성 — Settings에서 Hermes 수집을 켜세요.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let builder = SummaryBuilder::new(config).map_err(|e| e.to_string())?;
+        if summary_only {
+            let (sl, _) = builder.build_summary_layer().map_err(|e| e.to_string())?;
+            builder.save_summary_layer(&sl).map_err(|e| e.to_string())?;
+        } else if fts_only {
+            let (_, fts) = builder.build_summary_layer().map_err(|e| e.to_string())?;
+            builder.save_fts5_index(&fts).map_err(|e| e.to_string())?;
+        } else {
+            builder.run_pipeline().map_err(|e| e.to_string())?;
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 설정 조회(GUI 에서 편집 가능한 항목).
+#[derive(Serialize)]
+struct ConfigView {
+    codex_sessions: String,
+    hermes_sessions: String,
+    default_archive_days: u64,
+    enabled_codex: bool,
+    enabled_hermes: bool,
+    language: String,
+}
+
+#[tauri::command]
+async fn get_config() -> Result<ConfigView, String> {
+    let c = load_config();
+    Ok(ConfigView {
+        codex_sessions: c.codex_sessions.display().to_string(),
+        hermes_sessions: c.hermes_sessions.display().to_string(),
+        default_archive_days: c.default_archive_days,
+        enabled_codex: c.enabled_codex,
+        enabled_hermes: c.enabled_hermes,
+        language: c.language,
+    })
+}
+
+/// 설정 부분 갱신 후 config.json 에 저장. None 필드는 미변경.
+#[tauri::command]
+async fn set_config(
+    codex_sessions: Option<String>,
+    default_archive_days: Option<u64>,
+    enabled_codex: Option<bool>,
+    enabled_hermes: Option<bool>,
+    language: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut c = Config::load();
+        if let Some(p) = codex_sessions {
+            let p = p.trim();
+            if !p.is_empty() {
+                c.codex_sessions = std::path::PathBuf::from(p);
+            }
+        }
+        if let Some(d) = default_archive_days {
+            c.default_archive_days = d;
+        }
+        if let Some(b) = enabled_codex {
+            c.enabled_codex = b;
+        }
+        if let Some(b) = enabled_hermes {
+            c.enabled_hermes = b;
+        }
+        if let Some(l) = language {
+            c.language = l;
+        }
+        if let Some(path) = Config::config_file_path() {
+            c.save(&path).map_err(|e| e.to_string())?;
+        }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -273,7 +364,10 @@ pub fn run() {
             list_archived,
             restore,
             compact,
-            scan_sensitive
+            scan_sensitive,
+            summarize,
+            get_config,
+            set_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -286,14 +380,14 @@ mod tests {
     /// Config::load() 가 config.json 유무와 무관하게 CWD-절대경로를 만들어도
     /// GUI는 항상 app-data(저장소 밖)로 재배치해야 한다 — tauri dev 감시 루프 방지.
     #[test]
-    fn resolve_db_always_relocates_outside_repo() {
+    fn relocate_outputs_always_outside_repo() {
         // config.json 로드 후 expand_path 가 만드는 것과 같은 CWD 기반 절대경로 시뮬레이션
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut cfg = Config::new();
         cfg.codex_index_db = cwd.join("./codex_index.sqlite");
-        assert!(cfg.codex_index_db.is_absolute(), "전제: Config가 절대경로로 만듦");
+        assert!(cfg.codex_index_db.is_absolute(), "전제: Config가 절대경로로 만듭");
 
-        let resolved = resolve_db(cfg);
+        let resolved = relocate_outputs(cfg);
         assert!(
             resolved.codex_index_db.is_absolute(),
             "절대경로여야 함: {:?}",

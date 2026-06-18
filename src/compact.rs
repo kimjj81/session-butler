@@ -1,4 +1,5 @@
-//! Phase 3: Hermes 세션 compaction 및 민감정보 탐지
+//! Codex 세션 compaction 및 민감정보 탐지.
+//! (compact/sensitive-scan 은 CLI 에서 Backend::Codex 로 분류 → codex_sessions 대상.
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
 
-/// Hermes 세션 컴팩터
+/// Codex 세션 컴팩터
 pub struct SessionCompactor {
     config: Config,
     patterns: Vec<Regex>,
@@ -47,27 +48,35 @@ impl SessionCompactor {
             .collect()
     }
 
+    /// trash 디렉토리(codex_archive/trash — codex_sessions 밖이라 스캐너가
+    /// 휴지통 세션을 재색인하지 않음).
+    fn trash_dir(&self) -> PathBuf {
+        self.config.codex_archive.join("trash")
+    }
+
     /// trash 디렉토리 생성
     pub fn create_trash_dir(&self) -> Result<()> {
-        let trash_dir = self.config.hermes_sessions.join("trash");
-        fs::create_dir_all(&trash_dir)
+        fs::create_dir_all(self.trash_dir())
             .map_err(|e| Error::Io(e))?;
         Ok(())
     }
 
-    /// 파일명에서 날짜 추출 (예: 20260524_085035 -> 2026-05-24)
+    /// 파일명에서 날짜 추출 (rollout-YYYY-MM-DDTHH-MM-SS-uuid.jsonl -> YYYY-MM-DD)
     pub fn session_date_str(&self, path: &Path) -> Option<String> {
-        let filename = path.file_stem()?.to_str()?;
-        let date_part = filename.split('_').next()?;
-
-        if date_part.len() == 8 && date_part.chars().all(|c| c.is_ascii_digit()) {
-            let year = &date_part[0..4];
-            let month = &date_part[4..6];
-            let day = &date_part[6..8];
-            return Some(format!("{}-{}-{}", year, month, day));
+        let name = path.file_name()?.to_str()?;
+        let rest = name.strip_prefix("rollout-")?;
+        let date_part = rest.split('T').next()?;
+        // YYYY-MM-DD (길이 10, [4]/[7] 이 '-')
+        if date_part.len() != 10
+            || date_part.as_bytes()[4] != b'-'
+            || date_part.as_bytes()[7] != b'-'
+            || !date_part
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'-')
+        {
+            return None;
         }
-
-        None
+        Some(date_part.to_string())
     }
 
     /// 파일에 민감정보 포함 여부 확인
@@ -110,7 +119,7 @@ impl SessionCompactor {
 
         let pb = self.progress.spinner(&i18n::scan_sensitive_progress_label());
 
-        for entry in WalkDir::new(&self.config.hermes_sessions)
+        for entry in WalkDir::new(&self.config.codex_sessions)
             .follow_links(false)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -152,9 +161,9 @@ impl SessionCompactor {
         Ok(results)
     }
 
-    /// 세션을 trash로 이동
+    /// 세션을 trash(codex_archive/trash)로 이동
     pub fn move_to_trash(&self, path: &Path) -> Result<PathBuf> {
-        let trash_dir = self.config.hermes_sessions.join("trash");
+        let trash_dir = self.trash_dir();
         fs::create_dir_all(&trash_dir)
             .map_err(|e| Error::Io(e))?;
 
@@ -171,8 +180,12 @@ impl SessionCompactor {
             return self.move_to_trash(&trash_dir.join(&new_name));
         }
 
-        fs::rename(path, &dest)
-            .map_err(|e| Error::Io(e))?;
+        // trash 가 codex_archive 에 있어 codex_sessions 와 다른 파일시스템일 수 있다.
+        // rename 이 EXDEV 등으로 실패하면 복사+삭제 폴백(Codex 리뷰 P2).
+        if fs::rename(path, &dest).is_err() {
+            fs::copy(path, &dest).map_err(|e| Error::Io(e))?;
+            fs::remove_file(path).map_err(|e| Error::Io(e))?;
+        }
 
         Ok(dest)
     }
@@ -182,7 +195,7 @@ impl SessionCompactor {
         let cutoff = chrono::Utc::now().date_naive() - chrono::Days::new(days);
         let mut old_sessions = Vec::new();
 
-        for entry in WalkDir::new(&self.config.hermes_sessions)
+        for entry in WalkDir::new(&self.config.codex_sessions)
             .follow_links(false)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -268,7 +281,7 @@ mod tests {
         let config = Config::default();
         let compactor = SessionCompactor::new(config).unwrap();
 
-        let path = Path::new("20260524_085035.jsonl");
+        let path = Path::new("rollout-2026-05-24T08-50-35-abc.jsonl");
         assert_eq!(compactor.session_date_str(path), Some("2026-05-24".to_string()));
 
         let path = Path::new("invalid.jsonl");
@@ -318,11 +331,12 @@ mod tests {
         let sessions_dir = dir.path().join("sessions");
         fs::create_dir_all(&sessions_dir).unwrap();
 
-        let test_file = sessions_dir.join("test.jsonl");
+        let test_file = sessions_dir.join("rollout-2026-01-01T00-00-00-x.jsonl");
         File::create(&test_file).unwrap();
 
         let mut config = Config::default();
-        config.hermes_sessions = sessions_dir.clone();
+        config.codex_sessions = sessions_dir.clone();
+        config.codex_archive = dir.path().join("archive");
 
         let compactor = SessionCompactor::new(config).unwrap();
         let trash_path = compactor.move_to_trash(&test_file).unwrap();

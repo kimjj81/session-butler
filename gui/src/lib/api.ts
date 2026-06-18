@@ -43,7 +43,7 @@ export interface Report {
 }
 
 export interface ScanProgress {
-  kind: "bar" | "spinner" | "inc" | "finish";
+  kind: "bar" | "spinner" | "inc" | "finish" | "warn";
   n?: number;
   len?: number;
   msg?: string;

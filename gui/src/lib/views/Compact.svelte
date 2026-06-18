@@ -150,8 +150,8 @@
 
   {#if scanRunning}
     <div class="progress">
-      <div class="progress-msg">{scanMsg} — {fmtInt(scanPos)}/{fmtInt(scanLen)} ({scanPct()}%)</div>
-      <div class="bar"><div class="fill" style="width:{scanPct()}%"></div></div>
+      <div class="progress-msg">{scanMsg}{#if scanLen > 0} — {fmtInt(scanPos)}/{fmtInt(scanLen)} ({scanPct()}%){:else} — 진행 중…{/if}</div>
+      <div class="bar"><div class="fill" class:indet={scanLen === 0} style="width:{scanLen > 0 ? scanPct() : 100}%"></div></div>
     </div>
   {/if}
 
@@ -211,6 +211,8 @@
   .progress-msg { font-size: 12px; color: #9aa1a8; margin-bottom: 4px; }
   .bar { height: 8px; background: #1f242b; border-radius: 4px; overflow: hidden; }
   .fill { height: 100%; background: #2a9c62; transition: width 0.15s; }
+  .fill.indet { animation: indet 1.1s ease-in-out infinite; }
+  @keyframes indet { 0% { opacity: 0.3; } 50% { opacity: 1; } 100% { opacity: 0.3; } }
 
   .error { background: #3a1f1f; border: 1px solid #6b2a2a; color: #ffb4b4; padding: 10px 12px; border-radius: 6px; margin-top: 14px; font-size: 13px; }
 

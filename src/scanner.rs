@@ -32,7 +32,7 @@ impl CodexScanner {
         }
     }
 
-    /// 진행률 구현체 주입 (GUI는 EventProgress, 테스트/캡처는 NoopProgress)
+    /// 진행률 구현체 주입 (GUI는 EventProgress). 미지정 시 TerminalProgress.
     pub fn with_progress(mut self, progress: Arc<dyn Progress>) -> Self {
         self.progress = progress;
         self
@@ -80,7 +80,7 @@ impl CodexScanner {
                 Ok(meta) => results.push(meta),
                 Err(e) => {
                     let msg = format!("  ERROR processing {}: {}", path.display(), e);
-                    eprintln!("{}", msg);
+                    self.progress.warn(&msg);
                 }
             }
         }

@@ -11,8 +11,16 @@ use session_butler::scanner::CodexScanner;
 use session_butler::summary::SummaryBuilder;
 use session_butler::types::{ArchivedSessionRow, SessionInfo, SensitiveFile};
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+
+/// DB 쓰기 커맨드 직렬화 락. 동시 커맨드(예: Scan 중 Archive)가 같은 app-data
+/// index.sqlite 에 동시 쓰기 → SQLITE_BUSY / 진행률 이벤트 cross-talk 되는 것을 방지.
+static DB_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_db() -> std::sync::MutexGuard<'static, ()> {
+    DB_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 쓰기 가능한 출력(DB/summary/fts5)을 저장소 밖 app-data 로 강제 재배치.
 /// 이유 — Config::load()/from_file 이 상대경로를 CWD 기준 절대화하는데, `tauri dev`
@@ -107,6 +115,10 @@ impl Progress for EventProgress {
             len: 0,
         })
     }
+
+    fn warn(&self, msg: &str) {
+        let _ = self.app.emit(self.event, serde_json::json!({ "kind": "warn", "msg": msg }));
+    }
 }
 
 struct EventBar {
@@ -147,6 +159,7 @@ async fn scan(app: AppHandle) -> Result<ScanSummary, String> {
     let config = load_config();
     let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "scan-progress" });
     tauri::async_runtime::spawn_blocking(move || {
+        let _g = lock_db();
         let scanner = CodexScanner::new(config).with_progress(progress);
         let metas = scanner.scan_all().map_err(|e| e.to_string())?;
         let n = metas.len();
@@ -171,16 +184,17 @@ async fn archive(app: AppHandle, days: u64, dry_run: bool, move_originals: bool)
     let config = load_config();
     let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "archive-progress" });
     tauri::async_runtime::spawn_blocking(move || {
+        let _g = lock_db();
         let db = SessionDb::new(&config.codex_index_db).map_err(|e| e.to_string())?;
-        // 파괴적 archive 전에 DB를 디스크와 동기화(scan). app-data DB 가 비어있거나
-        // 오래된 상태에서 move_originals=true 가 되면, mark_archived 실패 후에도
-        // 원본이 이미 삭제돼 복구 불가 상태가 되는 데이터 손실(Codex 리뷰 P1)을 막는다.
+        // 파괴적 archive 전(및 dry_run 미리보기)에 DB를 디스크와 동기화(scan).
+        // - 실제 archive: mark_archived 가 성공하려면 세션 행이 있어야(원본 삭제 전 데이터 손실 방지).
+        // - dry_run: 미리보기도 동일 DB 기반 보관후보를 봐야 정확 → scan 필수.
+        // 인덱스 갱신은 idempotent(부작용 아님). 비용은 있지만 정확성이 우선.
         let scanner = CodexScanner::new(config.clone()).with_progress(progress.clone());
         let metas = scanner.scan_all().map_err(|e| e.to_string())?;
         scanner.index_sessions(metas).map_err(|e| e.to_string())?;
         let archiver = SessionArchiver::new(config).with_progress(progress);
         // DB 기반 보관 대상 선정: date < cutoff 이고 미보관(archived=0).
-        // (filter_by_days 는 조회용 '최근 N일' 필터라 방향이 반대 — Codex 리뷰 P1.)
         let candidates = db.list_archive_candidates(days).map_err(|e| e.to_string())?;
         let old: Vec<&SessionInfo> = candidates.iter().collect();
         let res = archiver.archive(&old, dry_run, move_originals, &db).map_err(|e| e.to_string())?;
@@ -218,6 +232,7 @@ async fn restore(app: AppHandle, dry_run: bool, purge: bool) -> Result<RestoreSu
     let config = load_config();
     let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "restore-progress" });
     tauri::async_runtime::spawn_blocking(move || {
+        let _g = lock_db();
         let db = SessionDb::new(&config.codex_index_db).map_err(|e| e.to_string())?;
         let rows = db.list_archived().map_err(|e| e.to_string())?;
         let archiver = SessionArchiver::new(config).with_progress(progress);
@@ -239,8 +254,12 @@ struct CompactSummary {
 #[tauri::command]
 async fn compact(app: AppHandle, days: u64, dry_run: bool) -> Result<CompactSummary, String> {
     let config = load_config();
+    if !config.enabled_codex {
+        return Err("compaction 대상 백엔드(Codex)가 비활성 — Settings에서 수집을 켜세요.".into());
+    }
     let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "compact-progress" });
     tauri::async_runtime::spawn_blocking(move || {
+        let _g = lock_db();
         let compactor = SessionCompactor::new(config).map_err(|e| e.to_string())?.with_progress(progress);
         let res = compactor.compact_sessions(days, dry_run).map_err(|e| e.to_string())?;
         Ok::<CompactSummary, String>(CompactSummary {
@@ -257,8 +276,12 @@ async fn compact(app: AppHandle, days: u64, dry_run: bool) -> Result<CompactSumm
 #[tauri::command]
 async fn scan_sensitive(app: AppHandle) -> Result<Vec<SensitiveFile>, String> {
     let config = load_config();
+    if !config.enabled_codex {
+        return Err("민감정보 스캔 대상 백엔드(Codex)가 비활성 — Settings에서 수집을 켜세요.".into());
+    }
     let progress: Arc<dyn Progress> = Arc::new(EventProgress { app, event: "scan-sensitive-progress" });
     tauri::async_runtime::spawn_blocking(move || {
+        let _g = lock_db();
         let compactor = SessionCompactor::new(config).map_err(|e| e.to_string())?.with_progress(progress);
         compactor.discover_sensitive_files().map_err(|e| e.to_string())
     })
@@ -266,15 +289,16 @@ async fn scan_sensitive(app: AppHandle) -> Result<Vec<SensitiveFile>, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Hermes/session_*.json 요약 + FTS5 인덱스 생성. summary_only/fts_only 로 부분 실행.
+/// session_*.json 요약 + FTS5 인덱스 생성. summary_only/fts_only 로 부분 실행.
 #[tauri::command]
 async fn summarize(summary_only: bool, fts_only: bool) -> Result<(), String> {
     let config = load_config();
-    // CLI 와 동일: Hermes 백엔드 비활성 시 실행하지 않는다(Codex 리뷰 P2).
+    // CLI 와 동일: summary 백엔드 비활성 시 실행하지 않는다(Codex 리뷰 P2).
     if !config.enabled_hermes {
-        return Err("summary 백엔드가 비활성 — Settings에서 Hermes 수집을 켜세요.".into());
+        return Err("summary 백엔드가 비활성 — Settings에서 수집을 켜세요.".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
+        let _g = lock_db();
         let builder = SummaryBuilder::new(config).map_err(|e| e.to_string())?;
         if summary_only {
             let (sl, _) = builder.build_summary_layer().map_err(|e| e.to_string())?;
@@ -325,7 +349,12 @@ async fn set_config(
     language: Option<String>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut c = Config::load();
+        // 파일(있으면) 기반으로 로드 — Config::load() 는 env 를 덮어쓰므로, 저장 시
+        // 일회성 환경변수(CODEX_INDEX_DB 등)가 config.json 에 영구 굳어지는 것을 막는다.
+        let mut c = match Config::config_file_path().filter(|p| p.exists()) {
+            Some(p) => Config::from_file(&p).unwrap_or_else(|_| Config::new()),
+            None => Config::new(),
+        };
         if let Some(p) = codex_sessions {
             let p = p.trim();
             if !p.is_empty() {

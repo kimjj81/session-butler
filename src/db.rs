@@ -31,9 +31,12 @@ impl SessionDb {
 
     /// 테이블 초기화
     fn init_tables(&self) -> Result<()> {
-        // crash-safety + 성능 (단일 연결이라 동시성 이점은 없지만 내구성 향상)
-        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-            .map_err(|e| Error::Sqlite(e))?;
+        // crash-safety + 성능. busy_timeout: 다중 연결(GUI가 여러 커맨드 연결)에서
+        // 쓰기 잠금 충돌 시 즉시 SQLITE_BUSY 대신 최대 5s 대기.
+        self.conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+        )
+        .map_err(|e| Error::Sqlite(e))?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (

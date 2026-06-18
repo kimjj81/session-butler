@@ -1,4 +1,4 @@
-//! 진행률 표시 (indicatif 래퍼 + Progress trait).
+//! 진행률 표시 (Progress trait).
 //!
 //! 긴 작업(scan/archive/compact)에서 진행률 바/스피너를 표시한다.
 //! stderr가 터미널이 아니면(파이프/TUI의 gag 캡처 등) 자동으로 숨겨
@@ -27,6 +27,9 @@ pub trait Progress: Send + Sync {
     fn bar(&self, len: u64, msg: &str) -> Box<dyn Bar>;
     /// 부가 진행(예: DB 인덱싱)용 스피너.
     fn spinner(&self, msg: &str) -> Box<dyn Bar>;
+    /// 항목별 경고/에러(예: 파일 처리 실패). 기본 no-op.
+    /// TerminalProgress 는 stderr 출력, GUI(EventProgress)는 이벤트로 송출.
+    fn warn(&self, _msg: &str) {}
 }
 
 /// 진행 항목(handle). indicatif ProgressBar와 동일한 inc/finish 인터페이스.
@@ -61,6 +64,10 @@ impl Progress for TerminalProgress {
         pb.enable_steady_tick(Duration::from_millis(120));
         Box::new(TerminalBar(pb))
     }
+
+    fn warn(&self, msg: &str) {
+        eprintln!("{msg}");
+    }
 }
 
 struct TerminalBar(ProgressBar);
@@ -70,64 +77,5 @@ impl Bar for TerminalBar {
     }
     fn finish(&self) {
         self.0.finish();
-    }
-}
-
-/// 아무것도 표시하지 않는 진행률 — 비활성/캡처 환경용.
-pub struct NoopProgress;
-
-impl Progress for NoopProgress {
-    fn bar(&self, _len: u64, _msg: &str) -> Box<dyn Bar> {
-        Box::new(NoopBar)
-    }
-    fn spinner(&self, _msg: &str) -> Box<dyn Bar> {
-        Box::new(NoopBar)
-    }
-}
-
-struct NoopBar;
-impl Bar for NoopBar {
-    fn inc(&self, _n: u64) {}
-    fn finish(&self) {}
-}
-
-// ---- 레거시 free 함수 (archive/compact 가 Phase 2에서 trait로 전환 전까지 사용) ----
-
-/// 카운트 기반 진행률 바. `len` = 전체 항목 수.
-pub fn bar(len: u64, msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new(len);
-    pb.set_draw_target(draw_target());
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} {msg} [{bar:30.cyan/blue}] {human_pos}/{human_len} ({percent}%) ETA {eta}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-    pb.set_message(msg.to_string());
-    pb
-}
-
-/// 부가 진행(예: DB 인덱싱)용 스피너.
-pub fn spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_draw_target(draw_target());
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(120));
-    pb
-}
-
-/// 터미널 여부와 무관하게 아무것도 그리지 않는 no-op 바.
-pub fn hidden() -> ProgressBar {
-    ProgressBar::hidden()
-}
-
-/// `show`가 true이고 stderr가 터미널일 때만 보이는 바.
-pub fn bar_if(len: u64, msg: &str, show: bool) -> ProgressBar {
-    if show {
-        bar(len, msg)
-    } else {
-        hidden()
     }
 }

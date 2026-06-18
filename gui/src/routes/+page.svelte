@@ -28,6 +28,7 @@
   let scanPos = $state(0);
   let scanLen = $state(0);
   let scanMsg = $state("");
+  let scanWarns = $state(0);
 
   const WORDS_LABEL: Record<string, string> = {
     conversation: "대화", reasoning: "추론", tools: "도구·출력", "first-prompt": "첫 프롬프트", all: "전체(카테고리별)",
@@ -57,12 +58,14 @@
       if (p.kind === "bar") { scanPos = 0; scanLen = p.len ?? 0; }
     } else if (p.kind === "inc") {
       scanPos += p.n ?? 0;
+    } else if (p.kind === "warn") {
+      scanWarns += 1;
     }
   }
 
   async function doScan() {
     if (scanning) return;
-    scanning = true; scanPos = 0; scanLen = 0; scanMsg = "스캔 준비 중…";
+    scanning = true; scanPos = 0; scanLen = 0; scanWarns = 0; scanMsg = "스캔 준비 중…";
     try {
       await runScan(onScanProgress);
       await load();
@@ -82,22 +85,29 @@
   const barOpts = { plugins: noLegend, scales: { x: { grid: xGrid }, y: { grid: yGrid } } };
   const lineOpts = { plugins: noLegend, scales: { x: { grid: xGrid }, y: { grid: yGrid } } };
 
-  function toolsData() {
-    const t = report?.top_tools ?? [];
-    return { labels: t.map((x) => x.tool), datasets: [{ data: t.map((x) => x.calls), backgroundColor: BAR, borderRadius: 4 }] };
-  }
-  function weekdayData() {
-    const w = report?.activity_by_weekday ?? [];
-    return { labels: w.map((x) => x.weekday), datasets: [{ data: w.map((x) => x.sessions), backgroundColor: BAR, borderRadius: 4 }] };
-  }
-  function trendData() {
-    // 버킷은 내림차순(최근 위) → 시간순 좌→우 로 reverse
-    const b = [...(report?.time_buckets ?? [])].reverse();
-    return {
-      labels: b.map((x) => x.label),
-      datasets: [{ label: "세션", data: b.map((x) => x.sessions), borderColor: BAR, backgroundColor: "rgba(47,111,237,0.15)", tension: 0.3, fill: true, pointRadius: 2 }],
-    };
-  }
+  // $derived: report 가 바뀔 때만 재계산 → Chart 가 매 flush 마다 destroy/재생성하지 않음.
+  let toolsData = $derived(
+    (() => {
+      const t = report?.top_tools ?? [];
+      return { labels: t.map((x) => x.tool), datasets: [{ data: t.map((x) => x.calls), backgroundColor: BAR, borderRadius: 4 }] };
+    })(),
+  );
+  let weekdayData = $derived(
+    (() => {
+      const w = report?.activity_by_weekday ?? [];
+      return { labels: w.map((x) => x.weekday), datasets: [{ data: w.map((x) => x.sessions), backgroundColor: BAR, borderRadius: 4 }] };
+    })(),
+  );
+  let trendData = $derived(
+    (() => {
+      // 버킷은 내림차순(최근 위) → 시간순 좌→우 로 reverse
+      const b = [...(report?.time_buckets ?? [])].reverse();
+      return {
+        labels: b.map((x) => x.label),
+        datasets: [{ label: "세션", data: b.map((x) => x.sessions), borderColor: BAR, backgroundColor: "rgba(47,111,237,0.15)", tension: 0.3, fill: true, pointRadius: 2 }],
+      };
+    })(),
+  );
 
   onMount(load);
 </script>
@@ -138,7 +148,10 @@
 
     {#if scanning}
       <div class="scan-bar">
-        <div class="scan-msg">{scanMsg} — {fmtInt(scanPos)}/{fmtInt(scanLen)} ({scanPct()}%)</div>
+        <div class="scan-msg">
+          {scanMsg} — {fmtInt(scanPos)}/{fmtInt(scanLen)} ({scanPct()}%)
+          {#if scanWarns > 0}<span class="warn"> · 실패 {fmtInt(scanWarns)}건</span>{/if}
+        </div>
         <div class="bar"><div class="fill" style="width:{scanPct()}%"></div></div>
       </div>
     {/if}
@@ -182,7 +195,7 @@
       <section>
         <h2>자주 쓴 tool/skill (top {report.top_tools.length})</h2>
         {#if report.top_tools.length === 0}<p class="muted">없음</p>{:else}
-        <Chart type="bar" data={toolsData()} options={horizontalBarOpts} height={Math.min(360, report.top_tools.length * 24 + 30)} />
+        <Chart type="bar" data={toolsData} options={horizontalBarOpts} height={Math.min(360, report.top_tools.length * 24 + 30)} />
         <details class="exact">
           <summary>정확한 수치 ({report.top_tools.length})</summary>
           <ul class="kv">
@@ -209,7 +222,7 @@
       <section>
         <h2>요일별 활동</h2>
         {#if report.activity_by_weekday.length === 0}<p class="muted">없음</p>{:else}
-        <Chart type="bar" data={weekdayData()} options={barOpts} height={200} />
+        <Chart type="bar" data={weekdayData} options={barOpts} height={200} />
         <details class="exact">
           <summary>정확한 수치</summary>
           <ul class="kv">
@@ -241,7 +254,7 @@
     <section>
       <h2>시간 버킷 추세 ({by})</h2>
       {#if report.time_buckets.length === 0}<p class="muted">없음</p>{:else}
-      <div class="trend"><Chart type="line" data={trendData()} options={lineOpts} height={200} /></div>
+      <div class="trend"><Chart type="line" data={trendData} options={lineOpts} height={200} /></div>
       <table class="buckets">
         <thead><tr><th>구간</th><th class="r">세션</th><th class="r">토큰</th><th>대표 스킬</th><th>최빈 단어</th></tr></thead>
         <tbody>
@@ -311,6 +324,7 @@
   button.scan { background: #1f7a4d; border-color: #2a9c62; }
   .scan-bar { margin-top: 14px; }
   .scan-msg { font-size: 12px; color: #9aa1a8; margin-bottom: 4px; }
+  .scan-msg .warn { color: #e0a458; }
   .bar { height: 8px; background: #1f242b; border-radius: 4px; overflow: hidden; }
   .fill { height: 100%; background: #2a9c62; transition: width 0.15s; }
   .error { background: #3a1f1f; border: 1px solid #6b2a2a; color: #ffb4b4; padding: 10px 12px; border-radius: 6px; margin: 16px 0; }

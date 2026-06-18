@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { getConfig, setConfig, type ConfigView } from "$lib/api";
 
   let loading = $state(true);
@@ -58,6 +58,10 @@
       running = false;
     }
   }
+
+  onDestroy(() => {
+    if (savedTimer) clearTimeout(savedTimer);
+  });
 </script>
 
 <section>

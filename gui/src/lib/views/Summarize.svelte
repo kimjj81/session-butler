@@ -31,7 +31,7 @@
 <section>
   <h2>Summarize</h2>
 
-  <p class="desc">Hermes session_*.json → 요약 + FTS5 인덱스 생성</p>
+  <p class="desc">session_*.json → 요약 + FTS5 인덱스 생성</p>
 
   <div class="note">
     summary 백엔드 비활성 가능성 — 설정 확인

@@ -131,6 +131,12 @@ impl SessionArchiver {
     fn zst_dest_path(&self, session: &SessionInfo) -> PathBuf {
         let src = &session.path;
         let dest = &self.config.codex_archive;
+        // 파일명이 없는 경로('/')면 전체 경로 표현을 폴백으로 써 panic 을 피한다.
+        let fname = || {
+            src.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| src.to_string_lossy().into_owned())
+        };
 
         let dest_path = if let Some(date) = session.date {
             let relative = src.strip_prefix(&self.config.codex_sessions)
@@ -143,15 +149,14 @@ impl SessionArchiver {
 
             let date_path = if parts.len() >= 3 {
                 // 월/일/파일 형태로 변환
-                format!("{}/{}/{}", date.month(), date.day(),
-                    src.file_name().unwrap().to_string_lossy())
+                format!("{}/{}/{}", date.month(), date.day(), fname())
             } else {
-                src.file_name().unwrap().to_string_lossy().to_string()
+                fname()
             };
 
             dest.join(date.to_string()).join(date_path)
         } else {
-            dest.join(src.file_name().unwrap().to_string_lossy().as_ref())
+            dest.join(fname())
         };
 
         PathBuf::from(format!("{}.zst", dest_path.display()))
@@ -503,8 +508,11 @@ impl SessionArchiver {
                 );
 
                 for session in items.iter().take(5) {
+                    let fname = session.path.file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| session.path.display().to_string());
                     println!("  {} ({:.0}KB) model={}",
-                        session.path.file_name().unwrap().to_string_lossy(),
+                        fname,
                         session.size_bytes as f64 / 1024.0,
                         session.model_provider.as_deref().unwrap_or("?")
                     );

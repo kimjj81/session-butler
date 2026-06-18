@@ -30,8 +30,8 @@ The tool manages **Codex** session logs and summarizes `session_*.json` logs (th
 | `archive` | zstd-compress sessions **older than the retention window** (keeps the recent N days). `--move` deletes originals after; `--skip-scan` skips the pre-archive scan |
 | `restore` | Restore from `.zst` — reads the **DB archive index** (works even if originals are gone). `--purge` deletes the `.zst` afterward |
 | `list` / `stats` | List / summarize sessions from the last N days |
-| `insights` | Usage insights from indexed data — tools/skills, projects, token/time trends (`--by day/week/month`), top words |
-| `compact` | Safe compaction + sensitive-info detection (`.env`, tokens, keys) |
+| `insights` | Usage insights from indexed data — tools/skills, projects, token/time trends (`--by day/week/month`), top words (`--words all` \| `conversation` \| `reasoning` \| `tools` \| `first-prompt`) |
+| `compact` | Move old `rollout-*.jsonl` to `codex_archive/trash` + sensitive-info detection (`.env`, tokens, keys) |
 
 Archive state and SHA-256 checksums are stored in the **SQLite index**, so `restore` can verify integrity and find sessions even after originals are removed.
 
@@ -47,11 +47,11 @@ Note: this backend writes several file types (`session_*.json`, `request_dump_*.
 
 ## Build
 
-Requires Rust (edition 2024).
+Requires Rust (edition 2024). The repo is a Cargo workspace: the CLI/TUI library+binary at the root, and a **Tauri + Svelte** GUI under `gui/`.
 
 ```bash
 cargo build --release
-# → ./target/release/session-butler
+# → ./target/release/session-butler  (CLI/TUI)
 ```
 
 Or run directly during development:
@@ -59,6 +59,16 @@ Or run directly during development:
 ```bash
 cargo run --release -- <command>
 ```
+
+GUI (desktop app) — see [GUI](#gui-tauri--svelte) below.
+
+```bash
+cd gui && npm install
+npm run tauri dev          # launch the app (hot reload)
+npm run tauri build        # → target/release/bundle/{macos,dmg}/  (.app / .dmg)
+```
+
+> The GUI keeps its own index DB and summary outputs **outside the repo** (under the app-data dir, e.g. `~/Library/Application Support/session-butler/`) so `tauri dev`'s file watcher doesn't loop. Click **Scan** in the app to populate it.
 
 ## Usage
 
@@ -100,6 +110,23 @@ session-butler summarize --fts-only
 # Everything, in order
 session-butler pipeline --days 30 --dry-run
 ```
+
+## GUI (Tauri + Svelte)
+
+A desktop dashboard with **full parity** to the CLI, reusing the same Rust core. Tabs:
+
+- **Dashboard** — insights overview cards, tool-ranking/weekday/trend **charts** (Chart.js), per-category word clouds, token leaders. Live **Scan** button with progress.
+- **Archive / Restore / Compact** — parameter forms + live progress + result summaries (archive compresses old sessions; restore from the DB archive index; compact moves old sessions to trash + secret scan).
+- **Summarize** — build the summary + FTS5 layer.
+- **Settings** — Codex/summary backend toggles, retention days, session paths, language.
+
+```bash
+cd gui
+npm run tauri dev     # develop
+npm run tauri build   # produce the .app / .dmg
+```
+
+The GUI talks to the Rust core via Tauri commands (long ops run on a blocking thread with progress streamed as events). It serializes mutating commands and keeps its index/outputs in the app-data dir (see [Build](#build)).
 
 ## Settings
 
@@ -154,7 +181,7 @@ Measured on my own session history:
 
 ## Status
 
-Scan/index, archive/restore (SQLite-backed), compaction, usage insights, summarization, TUI (with live progress), and CLI are all functional.
+Scan/index, archive/restore (SQLite-backed), compaction, usage insights (with per-category word analysis), summarization, TUI (with live progress), CLI, and a **Tauri+Svelte desktop GUI** are all functional.
 
 ## License
 

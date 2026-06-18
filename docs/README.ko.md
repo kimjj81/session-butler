@@ -30,8 +30,8 @@
 | `archive` | 보존 기간보다 **오래된** 세션을 zstd 압축(최근 N일은 보존). `--move`는 압축 후 원본 삭제, `--skip-scan`은 사전 스캔 생략 |
 | `restore` | `.zst`에서 복원 — **DB 아카이브 인덱스**를 읽습니다(원본이 없어도 동작). `--purge`는 복원 후 `.zst` 삭제 |
 | `list` / `stats` | 최근 N일 세션의 목록 및 통계 |
-| `insights` | 인덱싱된 데이터로 사용 인사이트 — tool/skill, 프로젝트, 토큰/시간 추세(`--by day/week/month`), 상위 단어 |
-| `compact` | 안전한 컴팩션 + 민감정보 탐지(`.env`, token, key) |
+| `insights` | 인덱싱된 데이터로 사용 인사이트 — tool/skill, 프로젝트, 토큰/시간 추세(`--by day/week/month`), 상위 단어(`--words all` \| `conversation` \| `reasoning` \| `tools` \| `first-prompt`) |
+| `compact` | 오래된 `rollout-*.jsonl`을 `codex_archive/trash`로 이동 + 민감정보 탐지(`.env`, token, key) |
 
 아카이브 상태와 SHA-256 체크섬은 **SQLite 인덱스**에 저장되어, `restore`가 무결성을 검증하고 원본 삭제 후에도 세션을 찾을 수 있습니다.
 
@@ -47,11 +47,11 @@
 
 ## 빌드
 
-Rust(edition 2024)가 필요하다.
+Rust(edition 2024)가 필요하다. 저장소는 Cargo 워크스페이스: 루트의 CLI/TUI 라이브러리+바이너리, 그리고 `gui/` 의 **Tauri + Svelte** GUI.
 
 ```bash
 cargo build --release
-# → ./target/release/session-butler
+# → ./target/release/session-butler  (CLI/TUI)
 ```
 
 개발 중에는 그냥 실행해도 된다:
@@ -59,6 +59,16 @@ cargo build --release
 ```bash
 cargo run --release -- <명령>
 ```
+
+GUI(데스크톱 앱) — 아래 [GUI](#gui-tauri--svelte) 참고.
+
+```bash
+cd gui && npm install
+npm run tauri dev          # 앱 실행(핫 리로드)
+npm run tauri build        # → target/release/bundle/{macos,dmg}/  (.app / .dmg)
+```
+
+> GUI는 인덱스 DB와 summary 출력을 **저장소 밖**(앱 데이터 디렉토리, 예: `~/Library/Application Support/session-butler/`)에 둬 `tauri dev` 파일 감시가 루프하지 않게 한다. 앱 안 **Scan** 으로 채운다.
 
 ## 사용법
 
@@ -100,6 +110,23 @@ session-butler summarize --fts-only
 # 한 번에 순차 실행
 session-butler pipeline --days 30 --dry-run
 ```
+
+## GUI (Tauri + Svelte)
+
+CLI와 **완전 동일한 기능**을 제공하는 데스크톱 대시보드(동일 Rust 핵심 재사용). 탭:
+
+- **대시보드** — 인사이트 개요 카드, tool 순위/요일/추세 **차트**(Chart.js), 카테고리별 단어 구름, 토큰 리더. 실시간 진행률 **Scan** 버튼.
+- **Archive / Restore / Compact** — 파라미터 폼 + 실시간 진행률 + 결과 요약(archive는 오래된 세션 압축; restore는 DB 아카이브 인덱스 기반; compact는 오래된 세션을 trash로 + 민감정보 스캔).
+- **Summarize** — summary + FTS5 레이어 생성.
+- **Settings** — Codex/요약 백엔드 토글, 보존 일수, 세션 경로, 언어.
+
+```bash
+cd gui
+npm run tauri dev     # 개발
+npm run tauri build   # .app / .dmg 생성
+```
+
+GUI는 Tauri 커맨드로 Rust 핵심을 호출한다(긴 작업은 블로킹 스레드에서 진행률을 이벤트로 스트리밍). 변형 커맨드를 직렬화하고, 인덱스/출력은 앱 데이터 디렉토리에 둔다([빌드](#빌드) 참고).
 
 ## 설정
 
@@ -154,7 +181,7 @@ Codex와 요약 백엔드 각각 활성화/비활성화할 수 있습니다. 우
 
 ## 개발 현황
 
-스캔/인덱싱, 압축/복원(SQLite 기반), 컴팩션, 사용 인사이트, 요약, TUI(실시간 진행률 포함), CLI 모두 동작한다.
+스캔/인덱싱, 압축/복원(SQLite 기반), 컴팩션, 사용 인사이트(카테고리별 단어 분석 포함), 요약, TUI(실시간 진행률 포함), CLI, 그리고 **Tauri+Svelte 데스크톱 GUI** 모두 동작한다.
 
 ## 라이선스
 

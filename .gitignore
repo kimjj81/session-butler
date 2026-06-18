@@ -12,3 +12,14 @@ __pycache__/
 
 # Rust build artifacts
 /target/
+
+# GUI / Tauri 번들 산출물 (보통 /target/ 아래, 방어적)
+*.app
+*.dmg
+*.exe
+*.msi
+*.AppImage
+*.deb
+
+# macOS
+.DS_Store

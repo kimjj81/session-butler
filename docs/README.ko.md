@@ -63,9 +63,13 @@ cargo run --release -- <명령>
 GUI(데스크톱 앱) — 아래 [GUI](#gui-tauri--svelte) 참고.
 
 ```bash
-cd gui && npm install
-npm run tauri dev          # 앱 실행(핫 리로드)
-npm run tauri build        # → target/release/bundle/{macos,dmg}/  (.app / .dmg)
+# 저장소 루트에서 (편의 스크립트가 gui/ 로 전달):
+npm run install:gui        # 최초 1회: gui 의존성 설치
+npm run dev                # = tauri dev (핫 리로드)
+npm run build:gui          # → target/release/bundle/{macos,dmg}/  (.app / .dmg)
+
+# 또는 gui/ 안에서 직접:
+cd gui && npm install && npm run tauri dev
 ```
 
 > GUI는 인덱스 DB와 summary 출력을 **저장소 밖**(앱 데이터 디렉토리, 예: `~/Library/Application Support/session-butler/`)에 둬 `tauri dev` 파일 감시가 루프하지 않게 한다. 앱 안 **Scan** 으로 채운다.
@@ -121,9 +125,10 @@ CLI와 **완전 동일한 기능**을 제공하는 데스크톱 대시보드(동
 - **Settings** — Codex/요약 백엔드 토글, 보존 일수, 세션 경로, 언어.
 
 ```bash
-cd gui
-npm run tauri dev     # 개발
-npm run tauri build   # .app / .dmg 생성
+# 저장소 루트에서 (또는 cd gui && npm run tauri …):
+npm run install:gui   # 최초 1회
+npm run dev           # 개발
+npm run build:gui     # .app / .dmg 생성
 ```
 
 GUI는 Tauri 커맨드로 Rust 핵심을 호출한다(긴 작업은 블로킹 스레드에서 진행률을 이벤트로 스트리밍). 변형 커맨드를 직렬화하고, 인덱스/출력은 앱 데이터 디렉토리에 둔다([빌드](#빌드) 참고).

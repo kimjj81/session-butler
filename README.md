@@ -63,9 +63,13 @@ cargo run --release -- <command>
 GUI (desktop app) — see [GUI](#gui-tauri--svelte) below.
 
 ```bash
-cd gui && npm install
-npm run tauri dev          # launch the app (hot reload)
-npm run tauri build        # → target/release/bundle/{macos,dmg}/  (.app / .dmg)
+# from the repo root (convenience scripts forward to gui/):
+npm run install:gui        # one-time: install gui deps
+npm run dev                # = tauri dev (hot reload)
+npm run build:gui          # → target/release/bundle/{macos,dmg}/  (.app / .dmg)
+
+# …or run inside gui/ directly:
+cd gui && npm install && npm run tauri dev
 ```
 
 > The GUI keeps its own index DB and summary outputs **outside the repo** (under the app-data dir, e.g. `~/Library/Application Support/session-butler/`) so `tauri dev`'s file watcher doesn't loop. Click **Scan** in the app to populate it.
@@ -121,9 +125,10 @@ A desktop dashboard with **full parity** to the CLI, reusing the same Rust core.
 - **Settings** — Codex/summary backend toggles, retention days, session paths, language.
 
 ```bash
-cd gui
-npm run tauri dev     # develop
-npm run tauri build   # produce the .app / .dmg
+# from repo root (or cd gui && npm run tauri …):
+npm run install:gui   # one-time
+npm run dev           # develop
+npm run build:gui     # produce the .app / .dmg
 ```
 
 The GUI talks to the Rust core via Tauri commands (long ops run on a blocking thread with progress streamed as events). It serializes mutating commands and keeps its index/outputs in the app-data dir (see [Build](#build)).

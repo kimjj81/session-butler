@@ -1,0 +1,12 @@
+{
+  "name": "session-butler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Session Butler root scripts — GUI(Tauri+Svelte)는 gui/ 에 있습니다.",
+  "scripts": {
+    "tauri": "npm --prefix gui run tauri --",
+    "dev": "npm --prefix gui run tauri dev",
+    "build:gui": "npm --prefix gui run tauri build",
+    "install:gui": "npm --prefix gui install"
+  }
+}

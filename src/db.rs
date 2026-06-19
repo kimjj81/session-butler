@@ -91,17 +91,8 @@ impl SessionDb {
             [],
         ).map_err(|e| Error::Sqlite(e))?;
 
-        // 대화 본문 단어 빈도 — 카테고리(conversation/reasoning/tools)별 (insights --words용)
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS session_words (
-                session_id TEXT NOT NULL,
-                category   TEXT NOT NULL,
-                word       TEXT NOT NULL,
-                count      INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (session_id, category, word)
-            )",
-            [],
-        ).map_err(|e| Error::Sqlite(e))?;
+        // 참고: 단어 빈도(conversation/reasoning/tools)는 더 이상 영속화하지 않는다.
+        // insights --words 는 쿼리 시점에 세션 파일(또는 압축본)을 직접 읽어 transient 집계.
 
         self.migrate()?;
 
@@ -149,39 +140,29 @@ impl SessionDb {
                 .map_err(|e| Error::Sqlite(e))?;
         }
 
-        if version < 3 {
-            // session_words 테이블 (대화 본문 단어 빈도). init_tables에서도 생성하지만 구버전 DB 호환용.
-            self.conn.execute(
-                "CREATE TABLE IF NOT EXISTS session_words (
-                    session_id TEXT NOT NULL,
-                    word       TEXT NOT NULL,
-                    count      INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (session_id, word)
-                )",
+        if version < 5 {
+            // session_words 테이블 폐기 — 단어 분석은 쿼리 시점 transient(파일 직접 읽기)로 전환.
+            // 테이블이 존재했던(구 버전) DB는 DROP 후 1회 VACUUM 으로 단편화/공간을 회수한다.
+            // (fresh DB 에서는 DROP IF EXISTS 가 no-op; VACUUM 은 테이블이 있었을 때만.)
+            let had_words_table: i64 = self.conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_words'",
                 [],
-            ).map_err(|e| Error::Sqlite(e))?;
-            self.conn.execute("PRAGMA user_version = 3", [])
-                .map_err(|e| Error::Sqlite(e))?;
-        }
-
-        if version < 4 {
-            // session_words 에 category 컬럼 추가 — 기존 스키마(category 없음)를 버리고
-            // 새 스키마로 재생성. session_words 는 v3에서 막 도입된 테이블이고 재스캔으로
-            // 백필되므로 drop해도 안전하다.
+                |row| row.get(0),
+            ).unwrap_or(0);
             self.conn.execute("DROP TABLE IF EXISTS session_words", [])
                 .map_err(|e| Error::Sqlite(e))?;
-            self.conn.execute(
-                "CREATE TABLE session_words (
-                    session_id TEXT NOT NULL,
-                    category   TEXT NOT NULL,
-                    word       TEXT NOT NULL,
-                    count      INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (session_id, category, word)
-                )",
-                [],
-            ).map_err(|e| Error::Sqlite(e))?;
-            self.conn.execute("PRAGMA user_version = 4", [])
+            self.conn.execute("PRAGMA user_version = 5", [])
                 .map_err(|e| Error::Sqlite(e))?;
+
+            if had_words_table == 1 {
+                // VACUUM 은 트랜잭션 외부(autocommit)에서만 동작. 기존 거대 DB(GB 단위)의
+                // 빈 페이지를 회수 — 최초 1회, 파일 크기에 비례해 수 분 소요 가능.
+                // 실패해도 DROP+version 반영은 이미 끝났으므로 non-fatal(수동 VACUUM 권장).
+                eprintln!("session_words 폐기 — DB 축소(VACUUM) 중... (최초 1회, 수 분 소요 가능)");
+                if let Err(e) = self.conn.execute("VACUUM", []) {
+                    eprintln!("WARNING: VACUUM 실패(무시 가능, 수동 실행 권장) — 수동 실행: sqlite3 \"<index.db>\" \"VACUUM;\" ({})", e);
+                }
+            }
         }
 
         Ok(())
@@ -275,8 +256,7 @@ impl SessionDb {
         // tool_usage 갱신 (기존 행 삭제 후 재삽입 — 재인덱싱 시 중복 방지)
         self.upsert_tool_usage(&meta.session_id, &meta.tool_usage)?;
 
-        // session_words 갱신 (기존 행 삭제 후 재삽입 — 재인덱싱 시 중복 방지)
-        self.upsert_session_words(&meta.session_id, &meta.word_counts)?;
+        // 참고: meta.word_counts 는 더 이상 영속화하지 않는다. (transient 분석 전환)
 
         Ok(())
     }
@@ -300,28 +280,6 @@ impl SessionDb {
         for (tool_name, count) in usage {
             stmt.execute(params![session_id, tool_name, *count as i64])
                 .map_err(|e| Error::Sqlite(e))?;
-        }
-
-        Ok(())
-    }
-
-    /// session_words 행 갱신: 기존 행 삭제 후 현재 분포 삽입.
-    /// words는 category → word → count. 빈 값이면 삭제만 수행(정합성 유지).
-    fn upsert_session_words(&self, session_id: &str, words: &HashMap<String, HashMap<String, usize>>) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM session_words WHERE session_id = ?1",
-            params![session_id],
-        ).map_err(|e| Error::Sqlite(e))?;
-
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO session_words (session_id, category, word, count) VALUES (?1, ?2, ?3, ?4)"
-        ).map_err(|e| Error::Sqlite(e))?;
-
-        for (category, counts) in words {
-            for (word, count) in counts {
-                stmt.execute(params![session_id, category, word, *count as i64])
-                    .map_err(|e| Error::Sqlite(e))?;
-            }
         }
 
         Ok(())
@@ -717,46 +675,6 @@ impl SessionDb {
         Ok(rows)
     }
 
-    /// session_words 테이블이 비어 있는지(미백필) — 기존 인덱스 폴백 판정용.
-    pub fn session_words_empty(&self) -> Result<bool> {
-        let mut stmt = self.conn.prepare("SELECT EXISTS(SELECT 1 FROM session_words LIMIT 1)")
-            .map_err(|e| Error::Sqlite(e))?;
-        let has: i64 = stmt.query_row([], |r| r.get(0)).map_err(|e| Error::Sqlite(e))?;
-        Ok(has == 0)
-    }
-
-    /// 특정 카테고리 단어 순위 (word, 총 빈도). 많이 쓴 순.
-    pub fn top_words_category(&self, days: u64, category: &str, limit: i64) -> Result<Vec<(String, i64)>> {
-        let cutoff = Self::cutoff_bound(days);
-        let mut stmt = self.conn.prepare(
-            "SELECT w.word, SUM(w.count) AS n \
-             FROM session_words w JOIN sessions s ON s.session_id = w.session_id \
-             WHERE s.date >= ?1 AND w.category = ?2 AND w.count > 0 \
-             GROUP BY w.word ORDER BY n DESC, w.word LIMIT ?3"
-        ).map_err(|e| Error::Sqlite(e))?;
-        let rows = stmt.query_map(params![cutoff, category, limit], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| Error::Sqlite(e))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| Error::Sqlite(e))?;
-        Ok(rows)
-    }
-
-    /// 특정 카테고리 시간 버킷 집계용: (date, word, count)
-    pub fn words_with_dates_category(&self, days: u64, category: &str) -> Result<Vec<(Option<String>, String, i64)>> {
-        let cutoff = Self::cutoff_bound(days);
-        let mut stmt = self.conn.prepare(
-            "SELECT s.date, w.word, w.count FROM session_words w \
-             JOIN sessions s ON s.session_id = w.session_id \
-             WHERE s.date >= ?1 AND w.category = ?2"
-        ).map_err(|e| Error::Sqlite(e))?;
-        let rows = stmt.query_map(params![cutoff, category], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        }).map_err(|e| Error::Sqlite(e))?
-          .collect::<rusqlite::Result<Vec<_>>>()
-          .map_err(|e| Error::Sqlite(e))?;
-        Ok(rows)
-    }
-
     /// 시간 버킷 집계용 세션 상세: (date, session_id, total_tokens, first_user_prompt)
     pub fn session_detail_window(
         &self,
@@ -769,6 +687,26 @@ impl SessionDb {
         ).map_err(|e| Error::Sqlite(e))?;
         let rows = stmt.query_map(params![cutoff], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        }).map_err(|e| Error::Sqlite(e))?
+          .collect::<rusqlite::Result<Vec<_>>>()
+          .map_err(|e| Error::Sqlite(e))?;
+        Ok(rows)
+    }
+
+    /// transient 단어 분석용: 윈도우 내 세션의 파일 위치.
+    /// (date, session_id, path(원본 .jsonl), compressed_path(.zst), archived).
+    /// 활성 세션은 path 를 직접 읽고, archived 세션은 compressed_path 를 메모리 해제해 분석.
+    pub fn session_locations_in_window(
+        &self,
+        days: u64,
+    ) -> Result<Vec<(Option<String>, String, Option<String>, Option<String>, i64)>> {
+        let cutoff = Self::cutoff_bound(days);
+        let mut stmt = self.conn.prepare(
+            "SELECT date, session_id, path, compressed_path, archived \
+             FROM sessions WHERE date >= ?1 ORDER BY date"
+        ).map_err(|e| Error::Sqlite(e))?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         }).map_err(|e| Error::Sqlite(e))?
           .collect::<rusqlite::Result<Vec<_>>>()
           .map_err(|e| Error::Sqlite(e))?;
@@ -924,66 +862,5 @@ mod tests {
         db.upsert_session(&meta).unwrap();
         assert_eq!(db.distinct_tools(0).unwrap(), 2);
         assert_eq!(db.distinct_projects(0).unwrap(), 1);
-    }
-
-    #[test]
-    fn test_session_words_roundtrip() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.sqlite");
-        let db = SessionDb::new(&db_path).unwrap();
-
-        let mut conv = HashMap::new();
-        conv.insert("login".to_string(), 3);
-        conv.insert("auth".to_string(), 5);
-        let mut reasoning = HashMap::new();
-        reasoning.insert("feasibility".to_string(), 2);
-        let mut words = HashMap::new();
-        words.insert("conversation".to_string(), conv);
-        words.insert("reasoning".to_string(), reasoning);
-
-        let mut meta = CodexSessionMeta {
-            path: PathBuf::from("/test/rollout-2026-01-01T12-00-00-uuid.jsonl"),
-            filename: "rollout-2026-01-01T12-00-00-uuid.jsonl".to_string(),
-            session_id: "2026-01-01T12-00-00-uuid".to_string(),
-            date: Some("2026-01-01".to_string()),
-            cwd: Some("/test".to_string()),
-            first_user_prompt: Some("test prompt".to_string()),
-            model_provider: Some("openai".to_string()),
-            cli_version: Some("1.0.0".to_string()),
-            source: Some("test".to_string()),
-            model: Some("gpt-4".to_string()),
-            git_sha: None,
-            git_branch: None,
-            git_origin_url: None,
-            tool_call_count: 0,
-            file_change_count: 0,
-            total_tokens: 0,
-            line_count: 0,
-            corrupt_lines: 0,
-            has_user_event: true,
-            size_bytes: 0,
-            indexed_at: Some(Utc::now()),
-            tool_usage: HashMap::new(),
-            word_counts: words,
-        };
-
-        db.upsert_session(&meta).unwrap();
-
-        // conversation: 많이 쓴 순 → auth(5)가 login(3)보다 선행
-        let top = db.top_words_category(0, "conversation", 10).unwrap();
-        assert_eq!(top.first().map(|(w, _)| w.as_str()), Some("auth"));
-        assert_eq!(top.len(), 2);
-
-        // reasoning 카테고리는 별도 집계
-        let rtop = db.top_words_category(0, "reasoning", 10).unwrap();
-        assert_eq!(rtop.first().map(|(w, _)| w.as_str()), Some("feasibility"));
-
-        // tools 카테고리는 비어 있어야 함
-        assert!(db.top_words_category(0, "tools", 10).unwrap().is_empty());
-
-        // 재 upsert(빈 map) 시 이전 session_words 행 제거
-        meta.word_counts = HashMap::new();
-        db.upsert_session(&meta).unwrap();
-        assert!(db.top_words_category(0, "conversation", 10).unwrap().is_empty());
     }
 }

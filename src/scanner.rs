@@ -9,7 +9,7 @@ use crate::types::CodexSessionMeta;
 use crate::util;
 use regex::Regex;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
@@ -91,19 +91,31 @@ impl CodexScanner {
         Ok(results)
     }
 
-    /// 단일 세션 메타데이터 추출 (스트리밍)
-    fn extract_session_meta(&self, path: &Path, token_re: &Regex) -> Result<CodexSessionMeta> {
+    /// 단일 세션 메타데이터 추출 (스트리밍). 파일 경로로부터 열어 reader 버전으로 위임.
+    pub fn extract_session_meta(&self, path: &Path, token_re: &Regex) -> Result<CodexSessionMeta> {
+        let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let file = File::open(path)
+            .map_err(|e| Error::Io(e))?;
+        self.extract_session_meta_reader(path, BufReader::new(file), size_bytes, token_re)
+    }
+
+    /// 단일 세션 메타데이터 추출 코어 — reader 기반.
+    /// 활성 세션은 파일 reader, 압축본은 메모리 해제한 bytes reader(`Cursor`)를 넘겨
+    /// 동일한 파싱/토큰화 로직(주입 컨텍스트·비밀 필터 포함)을 재사용한다.
+    /// `path` 는 메타데이터 기록용 논리 경로(압축본의 경우 DB 의 원본 path). session_id/date 는
+    /// filename 에서 파생되지만 transient 단어 분석에서는 호출측이 DB 행의 값을 그대로 쓰므로 미사용.
+    pub fn extract_session_meta_reader<R: std::io::BufRead>(
+        &self,
+        path: &Path,
+        reader: R,
+        size_bytes: u64,
+        token_re: &Regex,
+    ) -> Result<CodexSessionMeta> {
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| Error::InvalidPath(path.to_path_buf()))?;
 
         let (date, session_id) = self.parse_filename(filename)?;
-
-        let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-        let file = File::open(path)
-            .map_err(|e| Error::Io(e))?;
-        let reader = BufReader::new(file);
 
         let mut meta = CodexSessionMeta {
             path: PathBuf::from(util::nfc(&path.to_string_lossy())),
@@ -512,5 +524,30 @@ mod tests {
         assert_eq!(tools.get("login"), Some(&1)); // args 에만 (output 은 제외)
         assert!(tools.get("cmd").is_none()); // JSON 키는 제외됨
         assert!(tools.get("validated").is_none()); // 출력 본문 단어는 색인되지 않음
+    }
+
+    #[test]
+    fn test_extract_session_meta_reader_matches_path() {
+        // reader 진입점(transient 분석이 압축본 메모리 해제에 사용)이 path 버전과
+        // 동일한 토큰화 결과를 내는지 검증. 동일 본문을 Cursor로 공급해 비교.
+        let test_content = r##"{"type":"session_meta","payload":{"cwd":"/test"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the login bug in auth.rs"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"grep login auth.rs\",\"workdir\":\"/test\"}"}}
+{"type":"event_msg","payload":{"type":"agent_reasoning","text":"analyzing the login flow carefully"}}
+"##;
+        let path = std::path::Path::new("/test/rollout-2026-03-03T14-37-44-test.jsonl");
+        let config = Config::default();
+        let scanner = CodexScanner::new(config);
+        let token_re = Regex::new(TOKEN_RE).unwrap();
+        let reader = std::io::Cursor::new(test_content.as_bytes());
+        let meta = scanner.extract_session_meta_reader(path, reader, test_content.len() as u64, &token_re).unwrap();
+
+        let conv = meta.word_counts.get("conversation").expect("conversation");
+        assert_eq!(conv.get("login"), Some(&1));
+        assert_eq!(conv.get("auth.rs"), Some(&1));
+        let reas = meta.word_counts.get("reasoning").expect("reasoning");
+        assert_eq!(reas.get("analyzing"), Some(&1));
+        let tools = meta.word_counts.get("tools").expect("tools");
+        assert_eq!(tools.get("grep"), Some(&1));
     }
 }

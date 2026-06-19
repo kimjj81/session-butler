@@ -7,11 +7,13 @@ use crate::config::Config;
 use crate::db::SessionDb;
 use crate::error::{Error, Result};
 use crate::i18n;
+use crate::scanner::CodexScanner;
 use crate::util;
 use chrono::Datelike;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::Cursor;
 
 const WEEKDAYS_EN: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const WEEKDAYS_KO: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
@@ -143,19 +145,24 @@ pub fn build_report(config: &Config, days: u64, top: usize, by: Granularity, wor
 
     // 단어 분석: 카테고리별 섹션. all → 3카테고리 각각, 단일 카테고리 → 1섹션,
     // first-prompt → 첫 프롬프트 토큰화(기존 동작).
-    // 기존 인덱스(session_words 미백필) 보호: 카테고리 데이터가 없으면 첫 프롬프트로 폴백.
+    // 단어 빈도는 더 이상 session_words 테이블에 저장하지 않는다 — 쿼리 시점에
+    // 윈도우 내 세션 파일을 직접 읽어(transient) 인메모리로 집계한다.
     let detail = db.session_detail_window(days)?;
     let tool_rows = db.tool_usage_with_dates(days)?;
-    let words_fallback = db.session_words_empty()? && !matches!(words, WordsSource::FirstPrompt);
+    let locs = db.session_locations_in_window(days)?;
+    let window_words = extract_window_words(config, &locs, &token_re)?;
+
+    // 카테고리 추출 결과가 비면(파일 읽기 불가 등) first-prompt 로 폴백.
+    let words_fallback = window_words.is_empty() && !matches!(words, WordsSource::FirstPrompt);
     let effective_words = if words_fallback { WordsSource::FirstPrompt } else { words };
     let word_rows: Vec<(Option<String>, String, i64)> = match effective_words.bucket_category() {
-        Some(cat) => db.words_with_dates_category(days, cat)?,
+        Some(cat) => category_word_rows(&window_words, cat),
         None => prompt_word_rows(&detail, &token_re),
     };
     let buckets = build_buckets(&detail, &tool_rows, &word_rows, by);
 
     let peak_hour = peak_hour_from_ids(&ids);
-    let word_sections = build_word_sections(&db, effective_words, days, top, limit, &token_re)?;
+    let word_sections = build_word_sections(&window_words, &db, effective_words, days, top, &token_re)?;
 
     let report = Report {
         window_days: days,
@@ -246,18 +253,16 @@ fn prompt_word_rows(
 
 /// 선택된 WordsSource에 따라 카테고리별 단어 섹션을 구성.
 /// All → conversation/reasoning/tools 3섹션, 단일 카테고리 → 1섹션,
-/// FirstPrompt → 첫 프롬프트 토큰화(기존 동작).
+/// FirstPrompt → 첫 프롬프트 토큰화(DB의 작은 first_user_prompt 컬럼 사용).
+/// 카테고리 집계는 transient 추출 결과(window_words)에서 인메모리로 수행.
 fn build_word_sections(
+    window_words: &[SessionWords],
     db: &SessionDb,
     words: WordsSource,
     days: u64,
     top: usize,
-    limit: i64,
     token_re: &Regex,
 ) -> Result<Vec<WordSection>> {
-    let to_stats = |rows: Vec<(String, i64)>| -> Vec<WordStat> {
-        rows.into_iter().map(|(w, c)| WordStat { word: w, count: c }).collect()
-    };
     Ok(match words {
         WordsSource::FirstPrompt => {
             let prompts = db.first_user_prompts(days)?;
@@ -270,8 +275,10 @@ fn build_word_sections(
         WordsSource::All => {
             let mut v = Vec::new();
             for cat in crate::summary::WORD_CATEGORIES {
-                let ws = to_stats(db.top_words_category(days, cat, limit)?);
-                v.push(WordSection { category: cat.to_string(), words: ws });
+                v.push(WordSection {
+                    category: cat.to_string(),
+                    words: aggregate_category(window_words, cat, top),
+                });
             }
             v
         }
@@ -284,10 +291,91 @@ fn build_word_sections(
             };
             vec![WordSection {
                 category: cat.to_string(),
-                words: to_stats(db.top_words_category(days, cat, limit)?),
+                words: aggregate_category(window_words, cat, top),
             }]
         }
     })
+}
+
+/// transient 추출된 단어를 모은 세션 단위 구조.
+/// date(yyyy-mm-dd) 와 카테고리→(단어→빈도) 맵.
+struct SessionWords {
+    date: Option<String>,
+    cats: HashMap<String, HashMap<String, usize>>,
+}
+
+/// 윈도우 내 세션 파일들을 읽어 세션별 카테고리 단어 빈도를 인메모리로 추출.
+/// - 활성(archived=0): 원본 .jsonl 을 직접 읽는다.
+/// - 압축(archived=1): compressed_path(.zst)를 메모리에서 해제해 분석한다(디스크 임시 파일 없음).
+/// 읽기 불가/누락된 세션은 건너뛴다(0 기여).
+fn extract_window_words(
+    config: &Config,
+    locs: &[(Option<String>, String, Option<String>, Option<String>, i64)],
+    token_re: &Regex,
+) -> Result<Vec<SessionWords>> {
+    let scanner = CodexScanner::new(config.clone());
+    let mut out = Vec::with_capacity(locs.len());
+
+    for (date, _sid, path, compressed_path, archived) in locs {
+        let meta = if *archived == 1 {
+            // 압축본: .zst → 메모리 decode → Cursor 로 동일 파서 재사용.
+            let Some(zst) = compressed_path.as_deref() else { continue };
+            let zst_path = std::path::Path::new(zst);
+            if !zst_path.exists() { continue; }
+            let file = std::fs::File::open(zst_path).map_err(Error::Io)?;
+            let bytes = zstd::stream::decode_all(std::io::BufReader::new(file))
+                .map_err(|e| Error::Compression(e.to_string()))?;
+            let path_for_meta = path.as_deref().map(std::path::Path::new).unwrap_or(zst_path);
+            scanner.extract_session_meta_reader(
+                path_for_meta,
+                Cursor::new(bytes),
+                // bytes 길이는 해제 후이므로 원본 크기가 아님 — 메타 기록용 근사치.
+                // (transient 분석은 word_counts 만 사용하므로 size_bytes 는 미사용)
+                0,
+                token_re,
+            )?
+        } else {
+            let Some(p) = path.as_deref() else { continue };
+            let p_path = std::path::Path::new(p);
+            if !p_path.exists() { continue; }
+            scanner.extract_session_meta(p_path, token_re)?
+        };
+
+        if !meta.word_counts.is_empty() {
+            out.push(SessionWords { date: date.clone(), cats: meta.word_counts });
+        }
+    }
+
+    Ok(out)
+}
+
+/// 특정 카테고리의 단어를 (date, word, count) 행으로 평탄화 — 트렌드 버킷(word_rows) 입력용.
+fn category_word_rows(window_words: &[SessionWords], category: &str) -> Vec<(Option<String>, String, i64)> {
+    let mut out = Vec::new();
+    for sw in window_words {
+        if let Some(cat_map) = sw.cats.get(category) {
+            for (word, count) in cat_map {
+                out.push((sw.date.clone(), word.clone(), *count as i64));
+            }
+        }
+    }
+    out
+}
+
+/// 특정 카테고리의 단어를 윈도우 전체에서 합산해 상위 top 개의 WordStat 생성. 많이 쓴 순.
+fn aggregate_category(window_words: &[SessionWords], category: &str, top: usize) -> Vec<WordStat> {
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for sw in window_words {
+        if let Some(cat_map) = sw.cats.get(category) {
+            for (word, count) in cat_map {
+                *counts.entry(word.clone()).or_insert(0) += *count as i64;
+            }
+        }
+    }
+    let mut v: Vec<_> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    v.truncate(top);
+    v.into_iter().map(|(word, count)| WordStat { word, count }).collect()
 }
 
 /// first_user_prompt들을 토큰화해 상위 단어 추출 (불용어/숫자 제거).

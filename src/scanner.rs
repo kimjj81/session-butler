@@ -265,6 +265,22 @@ impl CodexScanner {
                             _ => {}
                         }
 
+                        // reasoning 단어 집계 — payload.type=="reasoning" 의 summary[] 텍스트.
+                        // Codex는 추론을 response_item/reasoning 에 저장한다(summary + encrypted_content).
+                        // summary 가 평문을 담을 때만 토큰화하고, encrypted_content(서버 암호화 블롭)는
+                        // 평문이 아니므로 건드리지 않는다. summary 가 비어 있으면 reasoning 단어 없음.
+                        if item_type == Some("reasoning") {
+                            if let Some(arr) = payload.get("summary").and_then(|v| v.as_array()) {
+                                for item in arr {
+                                    let text = item.as_str()
+                                        .or_else(|| item.get("text").and_then(|v| v.as_str()));
+                                    if let Some(t) = text {
+                                        add_words(&mut meta, "reasoning", t, token_re);
+                                    }
+                                }
+                            }
+                        }
+
                         // 토큰 수 집계
                         if let Some(usage) = payload.get("usage") {
                             if let Some(obj) = usage.as_object() {
@@ -288,11 +304,6 @@ impl CodexScanner {
                             }
                         } else if event_type == Some("patch_apply_end") {
                             meta.file_change_count += 1;
-                        } else if event_type == Some("agent_reasoning") {
-                            // reasoning 단어 집계 (모델 추론 요약 text).
-                            if let Some(t) = payload.get("text").and_then(|v| v.as_str()) {
-                                add_words(&mut meta, "reasoning", t, token_re);
-                            }
                         } else if event_type == Some("token_count") {
                             // payload.info.total_token_usage.total_tokens 는
                             // 세션 누적 토큰(이벤트가 주기적 스냅샷으로 여러 번 발생).
@@ -481,7 +492,7 @@ mod tests {
 {"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch"}}
 {"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"grep login auth.rs\",\"workdir\":\"/test\"}"}}
 {"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"auth.rs:42 login validated"}}
-{"type":"event_msg","payload":{"type":"agent_reasoning","text":"analyzing the login flow carefully"}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"analyzing the login flow carefully"}]}}
 {"type":"event_msg","payload":{"type":"task_started","model_context_window":"gpt-4"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"input_tokens":600,"output_tokens":150,"total_tokens":750}}}}
 "##;
@@ -533,7 +544,7 @@ mod tests {
         let test_content = r##"{"type":"session_meta","payload":{"cwd":"/test"}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the login bug in auth.rs"}]}}
 {"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"grep login auth.rs\",\"workdir\":\"/test\"}"}}
-{"type":"event_msg","payload":{"type":"agent_reasoning","text":"analyzing the login flow carefully"}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"analyzing the login flow carefully"}]}}
 "##;
         let path = std::path::Path::new("/test/rollout-2026-03-03T14-37-44-test.jsonl");
         let config = Config::default();

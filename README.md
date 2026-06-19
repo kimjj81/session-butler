@@ -26,11 +26,11 @@ The tool manages **Codex** session logs and summarizes `session_*.json` logs (th
 
 | Command | What it does |
 |---------|--------------|
-| `scan` | Walk **all** Codex `rollout-*.jsonl`, write metadata + FTS5 full-text index to SQLite |
+| `scan` | Walk **all** Codex `rollout-*.jsonl`, write metadata + FTS5 full-text index to SQLite (lightweight — per-session word counts are **not** persisted) |
 | `archive` | zstd-compress sessions **older than the retention window** (keeps the recent N days). `--move` deletes originals after; `--skip-scan` skips the pre-archive scan |
 | `restore` | Restore from `.zst` — reads the **DB archive index** (works even if originals are gone). `--purge` deletes the `.zst` afterward |
 | `list` / `stats` | List / summarize sessions from the last N days |
-| `insights` | Usage insights from indexed data — tools/skills, projects, token/time trends (`--by day/week/month`), top words (`--words all` \| `conversation` \| `reasoning` \| `tools` \| `first-prompt`) |
+| `insights` | Usage insights — tools/skills, projects, token/time trends (`--by day/week/month`), top words (`--words all` \| `conversation` \| `reasoning` \| `tools` \| `first-prompt`). Aggregates (tools/trends/overview) read the index; word analysis reads session files on demand (archived `.zst` are decompressed in memory) |
 | `compact` | Move old `rollout-*.jsonl` to `codex_archive/trash` + sensitive-info detection (`.env`, tokens, keys) |
 
 Archive state and SHA-256 checksums are stored in the **SQLite index**, so `restore` can verify integrity and find sessions even after originals are removed.
@@ -176,6 +176,10 @@ Measured on my own session history:
 | Summary-backend sessions | 82 (52 `session_*.json`) | 47 MB | 52 sessions summarized → `summary_layer.json` + `fts5_index.json` |
 
 **~2.4 GB of old Codex sessions now lives in ~860 MB** while remaining fully searchable through the SQLite + FTS5 index. Deleting originals with `archive --move` reclaims the rest.
+
+**Index diet:** the per-session word-frequency table (`session_words`) had ballooned `codex_index.sqlite` to **2.0 GB** (4.15M rows + DELETE/INSERT churn on every `scan`). Dropping it and computing word analysis on demand shrank the index to **~34 MB** (~60×) — and it no longer regrows on `scan`.
+
+> `--words reasoning` stays empty unless the Codex session logs reasoning summaries as plaintext. Codex stores reasoning encrypted (`encrypted_content`) with an empty `summary`, so there is nothing to tokenize. The parser reads `response_item`/`reasoning`/`summary`, so it picks text up automatically if/when summaries appear.
 
 ## Safety
 
